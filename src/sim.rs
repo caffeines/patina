@@ -28,14 +28,15 @@ pub enum View {
     Images,
     Volumes,
     Networks,
+    Builds,
     Machines,
     Kubernetes,
     Settings,
 }
 
 impl View {
-    pub const ALL: [View; 7] =
-        [View::Containers, View::Images, View::Volumes, View::Networks, View::Machines, View::Kubernetes, View::Settings];
+    pub const ALL: [View; 8] =
+        [View::Containers, View::Images, View::Volumes, View::Networks, View::Builds, View::Machines, View::Kubernetes, View::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -43,6 +44,7 @@ impl View {
             View::Images => "Images",
             View::Volumes => "Volumes",
             View::Networks => "Networks",
+            View::Builds => "Builds",
             View::Machines => "Machines",
             View::Kubernetes => "Kubernetes",
             View::Settings => "Settings",
@@ -55,6 +57,7 @@ impl View {
             View::Images => "images",
             View::Volumes => "volumes",
             View::Networks => "networks",
+            View::Builds => "builds",
             View::Machines => "machines",
             View::Kubernetes => "kubernetes",
             View::Settings => "settings",
@@ -108,6 +111,56 @@ pub enum Tab {
     Term,
     Info,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BuildSt {
+    Running,
+    Done,
+    Failed,
+    Canceled,
+}
+
+/// One entry of the engine's build history (`docker buildx history ls`).
+#[derive(Clone, Debug)]
+pub struct Build {
+    /// The build's ref, as `docker buildx history` takes it.
+    pub id: String,
+    pub name: String,
+    pub st: BuildSt,
+    /// Unix seconds.
+    pub created: i64,
+    /// Seconds it took; 0 while it's running.
+    pub secs: f64,
+    pub steps: u32,
+    pub done_steps: u32,
+    pub cached: u32,
+    pub err: String,
+}
+
+/// What `docker buildx history inspect` adds to a build.
+#[derive(Clone, Debug, Default)]
+pub struct BuildInfo {
+    pub dockerfile: String,
+    pub context: String,
+    pub platform: String,
+    pub repo: String,
+    pub revision: String,
+    pub args: String,
+    pub err: String,
+}
+
+/// The full-window log page: a container's logs or a build's log.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Page {
+    Logs(String),
+    BuildLog(String),
+}
+
+/// How much history the log page loads: label and `--tail` (None is all).
+pub const TAILS: [(&str, Option<u32>); 4] = [("Last 100", Some(100)), ("1,000", Some(1000)), ("10,000", Some(10000)), ("All", None)];
+
+/// Lines the log page keeps; past this it drops the oldest in one go.
+const PAGE_MAX: usize = 50_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Engine {
@@ -403,6 +456,76 @@ pub fn fmt_count(v: usize, word: &str) -> String {
     format!("{} {}{}", v, word, if v == 1 { "" } else { "s" })
 }
 
+/// A build log in `--progress plain` form, for the demo.
+fn demo_build_log(failed: bool) -> Vec<LogLine> {
+    let mut out = vec![
+        "#1 [internal] load build definition from Dockerfile",
+        "#1 transferring dockerfile: 1.21kB done",
+        "#1 DONE 0.0s",
+        "",
+        "#2 [internal] load metadata for docker.io/library/node:22-alpine",
+        "#2 DONE 1.4s",
+        "",
+        "#3 [internal] load .dockerignore",
+        "#3 transferring context: 112B done",
+        "#3 DONE 0.0s",
+        "",
+        "#4 [base 1/4] FROM docker.io/library/node:22-alpine@sha256:9f3a6c0e1b2d",
+        "#4 CACHED",
+        "",
+        "#5 [internal] load build context",
+        "#5 transferring context: 2.84MB 0.3s done",
+        "#5 DONE 0.4s",
+        "",
+        "#6 [base 2/4] WORKDIR /app",
+        "#6 CACHED",
+        "",
+        "#7 [base 3/4] COPY package.json package-lock.json ./",
+        "#7 DONE 0.1s",
+        "",
+        "#8 [base 4/4] RUN npm ci",
+        "#8 2.113 npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.",
+    ];
+    if failed {
+        out.extend([
+            "#8 9.402 npm error code ERESOLVE",
+            "#8 9.403 npm error ERESOLVE could not resolve",
+            "#8 9.405 npm error While resolving: storefront-worker@0.4.0",
+            "#8 9.405 npm error Found: redis@4.7.0",
+            "#8 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+            "------",
+            " > [base 4/4] RUN npm ci:",
+            "------",
+            "ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1",
+        ]);
+    } else {
+        out.extend([
+            "#8 14.82 added 412 packages, and audited 413 packages in 14s",
+            "#8 DONE 15.3s",
+            "",
+            "#9 [build 1/2] COPY . .",
+            "#9 DONE 0.2s",
+            "",
+            "#10 [build 2/2] RUN npm run build",
+            "#10 4.108 build complete in 3.6s",
+            "#10 DONE 4.4s",
+            "",
+            "#11 exporting to image",
+            "#11 exporting layers 1.2s done",
+            "#11 writing image sha256:2c4e9b81f07a done",
+            "#11 naming to docker.io/storefront/api:dev done",
+            "#11 DONE 1.3s",
+        ]);
+    }
+    out.into_iter()
+        .map(|m| {
+            let l = m.to_lowercase();
+            let k = if l.contains("error") { 3 } else if l.contains("warn") { 2 } else { 0 };
+            LogLine { t: String::new(), m: m.to_string(), k }
+        })
+        .collect()
+}
+
 fn log_lines(id: &str) -> &'static [(&'static str, u8)] {
     match id {
         "web" => &[
@@ -471,6 +594,25 @@ pub struct State {
 
     pub cs: Vec<Container>,
     pub logs: HashMap<String, Vec<LogLine>>,
+    pub builds: Vec<Build>,
+    /// Why build history can't be read (empty when it can).
+    pub builds_err: String,
+    pub build_sel: String,
+    pub build_at: f64,
+    pub build_info: HashMap<String, BuildInfo>,
+    /// Build history has been read at least once (or this is the demo).
+    pub builds_seen: bool,
+
+    // ---- the log page
+    pub page: Option<Page>,
+    pub page_at: f64,
+    pub page_lines: Vec<LogLine>,
+    /// Bumped whenever `page_lines` changes other than by appending.
+    pub page_rev: u64,
+    pub page_q: String,
+    pub page_tail: usize,
+    /// Scroll to the newest line on the next frame.
+    pub page_jump: bool,
     pub imgs: Vec<Asset>,
     pub vols: Vec<Asset>,
     pub nets: Vec<Net>,
@@ -572,6 +714,19 @@ impl State {
             clock: 50531,
             cs: Vec::new(),
             logs: HashMap::new(),
+            builds: Vec::new(),
+            builds_err: String::new(),
+            build_sel: String::new(),
+            build_at: now,
+            build_info: HashMap::new(),
+            builds_seen: false,
+            page: None,
+            page_at: now,
+            page_lines: Vec::new(),
+            page_rev: 0,
+            page_q: String::new(),
+            page_tail: 1,
+            page_jump: false,
             imgs: Vec::new(),
             vols: Vec::new(),
             nets: Vec::new(),
@@ -734,6 +889,7 @@ impl State {
                 a("mailpit_data", 38.0, "mailpit", "3 weeks ago"),
                 a("storefront_redis", 12.0, "cache", "3 weeks ago"),
             ];
+            s.seed_builds();
         }
         let net = |n: &str, driver: &str, subnet: &str, sys: bool, grp: &str| Net {
             n: n.into(),
@@ -854,6 +1010,11 @@ impl State {
                 }
             }
             "menu" => s.toggle_menu("api"),
+            "logs" => s.open_logs("web"),
+            "buildlog" => {
+                s.view = View::Builds;
+                s.open_build_log("w8q2n5v7c1k9x3m6p0r4t2yzb");
+            }
             "toast" => s.toast_say("Deleted worker", "Undo", Some(Undo::Box("worker".into()))),
             "pull" => {
                 s.view = View::Images;
@@ -926,6 +1087,61 @@ impl State {
             hostname: String::new(),
             mem_limit: 256.0,
         }
+    }
+
+    fn seed_builds(&mut self) {
+        let now = chrono::Utc::now().timestamp();
+        let b = |id: &str, name: &str, st: BuildSt, ago: i64, secs: f64, steps: u32, done: u32, cached: u32, err: &str| Build {
+            id: id.into(),
+            name: name.into(),
+            st,
+            created: now - ago,
+            secs,
+            steps,
+            done_steps: done,
+            cached,
+            err: err.into(),
+        };
+        self.builds = vec![
+            b("k3v9yq2m8x1c4n7p0s5r6t2wz", "storefront/api", BuildSt::Done, 2 * 3600, 64.2, 23, 23, 12, ""),
+            b("w8q2n5v7c1k9x3m6p0r4t2yzb", "storefront/worker", BuildSt::Failed, 2 * 3600 + 600, 38.4, 18, 11, 9, "process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1"),
+            b("p4m7x2c9v1n8k3q6r0t5y2wza", "storefront/web", BuildSt::Done, 5 * 86_400, 2.7, 14, 14, 14, ""),
+            b("d6r1t8y3u5i2o9p4a7s0f6gzh", "docs", BuildSt::Done, 6 * 86_400, 95.0, 9, 9, 2, ""),
+            b("c2v5b8n1m4q7w0e3r6t9y2uzi", "storefront/api", BuildSt::Canceled, 7 * 86_400, 12.0, 23, 6, 6, ""),
+        ];
+        for (i, bd) in self.builds.iter().enumerate() {
+            let app = bd.name.rsplit('/').next().unwrap_or(&bd.name);
+            self.build_info.insert(
+                bd.id.clone(),
+                BuildInfo {
+                    dockerfile: if i == 3 { "docs/Dockerfile".into() } else { "Dockerfile".into() },
+                    context: format!("~/code/storefront/{app}"),
+                    platform: "linux/arm64".into(),
+                    repo: "github.com/acme/storefront".into(),
+                    revision: ["4f2c9a1", "4f2c9a1", "b81e07d", "19ac3f2", "77d0e5c"][i % 5].into(),
+                    args: if app == "web" { "NODE_ENV=production".into() } else { String::new() },
+                    err: bd.err.clone(),
+                },
+            );
+        }
+        self.build_sel = self.builds[0].id.clone();
+        self.builds_seen = true;
+    }
+
+    /// A few hundred lines of history for the demo log page.
+    fn demo_history(&self, id: &str) -> Vec<LogLine> {
+        let lines = log_lines(id);
+        let n = 400usize;
+        (0..n)
+            .map(|i| {
+                let t = self.clock.saturating_sub(((n - i) * 3) as u64);
+                let (m, k) = lines[(i * 7 + i / 3) % lines.len()];
+                let m = if i % 37 == 11 {
+                    format!(r#"{{"level":"info","msg":"checkout completed","order":"ord_7Q2{i:05}","items":3,"total_cents":12900,"payment":{{"provider":"stripe","status":"succeeded","latency_ms":{}}},"user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"}}"#, 180 + i % 70)
+                } else if i % 23 == 5 { format!("{m} (request id 6f1c2a9e-4b7d-4e10-9a3c-{i:012}, upstream 172.18.0.{} took {}ms, retries 0, cache miss)", i % 9 + 2, 40 + i % 90) } else { m.to_string() };
+                LogLine { t: fmt_clock(t), m, k }
+            })
+            .collect()
     }
 
     fn seed_log(&self, c: &Container) -> Vec<LogLine> {
@@ -1064,8 +1280,12 @@ impl State {
                 (lines[i].0.to_string(), lines[i].1)
             }
         };
+        let line = LogLine { t: fmt_clock(t), m, k };
+        if self.page == Some(Page::Logs(id.to_string())) {
+            self.page_push(vec![line.clone()]);
+        }
         let list = self.logs.entry(id.to_string()).or_default();
-        list.push(LogLine { t: fmt_clock(t), m, k });
+        list.push(line);
         let n = list.len();
         if n > 10 {
             list.drain(0..n - 10);
@@ -1123,11 +1343,90 @@ impl State {
     // ------------------------------------------------------------- navigate
 
     pub fn go_view(&mut self, view: View) {
+        self.close_page();
         if view != self.view {
+            if (view == View::Builds) != (self.view == View::Builds) {
+                self.send(LCmd::BuildsOpen(view == View::Builds));
+            }
             self.view = view;
             self.view_at = self.time;
             self.q.clear();
             self.menu = None;
+        }
+    }
+
+    pub fn pick_build(&mut self, id: &str) {
+        if id != self.build_sel {
+            self.build_sel = id.to_string();
+            self.build_at = self.time;
+        }
+        if !self.build_info.contains_key(id) {
+            self.send(LCmd::BuildInfo(id.to_string()));
+        }
+    }
+
+    /// Read the build history again now.
+    pub fn refresh_builds(&self) {
+        self.send(LCmd::BuildsOpen(self.view == View::Builds));
+    }
+
+    /// The selected build, or the newest.
+    pub fn build(&self) -> Option<&Build> {
+        self.builds.iter().find(|b| b.id == self.build_sel).or_else(|| self.builds.first())
+    }
+
+    fn show_page(&mut self, page: Page) {
+        self.page = Some(page);
+        self.page_at = self.time;
+        self.page_lines.clear();
+        self.page_rev += 1;
+        self.page_q.clear();
+        self.page_jump = true;
+        self.menu = None;
+    }
+
+    /// Open a container's logs on their own page, following new lines.
+    pub fn open_logs(&mut self, id: &str) {
+        self.show_page(Page::Logs(id.to_string()));
+        if self.is_live() {
+            self.send(LCmd::OpenLogs { id: id.to_string(), tail: TAILS[self.page_tail].1 });
+        } else {
+            let lines = self.demo_history(id);
+            self.page_push(lines);
+        }
+    }
+
+    pub fn open_build_log(&mut self, id: &str) {
+        self.show_page(Page::BuildLog(id.to_string()));
+        if self.is_live() {
+            self.send(LCmd::OpenBuildLog(id.to_string()));
+        } else {
+            let failed = self.builds.iter().any(|b| b.id == id && b.st == BuildSt::Failed);
+            self.page_push(demo_build_log(failed));
+        }
+    }
+
+    pub fn close_page(&mut self) {
+        if self.page.take().is_some() {
+            self.send(LCmd::CloseLogs);
+        }
+    }
+
+    /// Reload the log page with a different amount of history.
+    pub fn set_page_tail(&mut self, i: usize) {
+        self.page_tail = i.min(TAILS.len() - 1);
+        if let Some(Page::Logs(id)) = self.page.clone() {
+            let q = std::mem::take(&mut self.page_q);
+            self.open_logs(&id);
+            self.page_q = q;
+        }
+    }
+
+    fn page_push(&mut self, lines: Vec<LogLine>) {
+        self.page_lines.extend(lines);
+        if self.page_lines.len() > PAGE_MAX {
+            self.page_lines.drain(0..self.page_lines.len() - PAGE_MAX * 4 / 5);
+            self.page_rev += 1;
         }
     }
 
@@ -2266,6 +2565,9 @@ impl State {
         s.engine = Engine::Booting;
         s.cold = true;
         s.live = Some(handle);
+        if s.view == View::Builds {
+            s.send(LCmd::BuildsOpen(true));
+        }
         s.installed = crate::engine::setup::installed();
         let cfg = crate::engine::config::load();
         s.saved = (cfg.cpus, cfg.memory_gb);
@@ -2399,6 +2701,42 @@ impl State {
                     if loops > 0 {
                         c.loops = loops;
                     }
+                }
+            }
+            live::Ev::Builds(Ok(list)) => {
+                self.builds_seen = true;
+                self.builds_err.clear();
+                self.builds = list;
+                if !self.builds.iter().any(|b| b.id == self.build_sel) {
+                    if let Some(b) = self.builds.first() {
+                        self.build_sel = b.id.clone();
+                    }
+                }
+                // Running builds change; fetch their details again.
+                let stale: Vec<String> = self.builds.iter().filter(|b| b.st == BuildSt::Running).map(|b| b.id.clone()).collect();
+                for id in stale {
+                    self.build_info.remove(&id);
+                }
+                if !self.build_sel.is_empty() && !self.build_info.contains_key(&self.build_sel) {
+                    self.send(LCmd::BuildInfo(self.build_sel.clone()));
+                }
+            }
+            live::Ev::Builds(Err(e)) => {
+                self.builds_seen = true;
+                self.builds_err = e;
+                self.builds.clear();
+            }
+            live::Ev::BuildInfo { id, info } => {
+                self.build_info.insert(id, info);
+            }
+            live::Ev::PageLogs { page, lines, reset } => {
+                if self.page.as_ref() == Some(&page) {
+                    let lines = lines.into_iter().map(|(t, m, k)| LogLine { t, m, k }).collect();
+                    if reset {
+                        self.page_lines.clear();
+                        self.page_rev += 1;
+                    }
+                    self.page_push(lines);
                 }
             }
             live::Ev::Logs { id, lines, reset } => {
@@ -2916,7 +3254,7 @@ mod tests {
     fn palette_filters_commands() {
         let mut s = state("", "");
         s.pal.q = "go to".into();
-        assert_eq!(s.pal_filtered().len(), 7);
+        assert_eq!(s.pal_filtered().len(), View::ALL.len());
         s.pal.q = "backup".into();
         assert!(s.pal_filtered().is_empty());
     }

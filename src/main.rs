@@ -39,12 +39,13 @@ OPTIONS:
     -h, --help          print this help
 
 VIEW OPTIONS:
-    --view <name>       containers | images | volumes | networks | machines | kubernetes | settings
+    --view <name>       containers | images | volumes | networks | builds | machines | kubernetes | settings
     --pane <name>       general | resources | network | engine | about   (with --view settings)
 
 DEMO OPTIONS (imply --demo):
     --scenario <name>   default | empty | loading | stopped | failed | trouble | update | diskfull | offline
     --show <name>       run | menu | delete | toast | palette | pull | blocked | prune | volume | machine
+                        | logs | buildlog
     --phase <name>      invalid | conflict | busy | nomatch | on | dirty
 ";
 

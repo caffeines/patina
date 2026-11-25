@@ -10,6 +10,7 @@ pub const VOLUMES: &str = "M3 4.2c0-1.2 2.2-2.2 5-2.2s5 1 5 2.2-2.2 2.2-5 2.2-5-
 pub const NETWORKS: &str = "M6.4 3.6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0M2 12.2a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0M10.8 12.2a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0M8 5.2v2.6M8 7.8l-3.6 3M8 7.8l3.6 3";
 pub const MACHINES: &str = "M4 2.8h8a2.2 2.2 0 0 1 2.2 2.2v6a2.2 2.2 0 0 1-2.2 2.2H4A2.2 2.2 0 0 1 1.8 11V5A2.2 2.2 0 0 1 4 2.8zM4.8 6.4L7 8 4.8 9.6M8.6 9.8h2.6";
 pub const KUBERNETES: &str = "M8 1.6l5.6 3.2v6.4L8 14.4l-5.6-3.2V4.8zM6.2 8a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0-3.6 0";
+pub const BUILDS: &str = "M8.6 2.4l1.6-.9 4.3 4.3-.9 1.6zM9.6 4.9l1.5 1.5M10.4 6.6l-6.5 6.5a1.1 1.1 0 0 1-1.6-1.6l6.5-6.5";
 pub const SETTINGS: &str = "M2.5 5h6M11.5 5h2M8.5 5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M2.5 11h2M7.5 11h6M4.5 11a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0";
 
 pub const PLUS: &str = "M8 3.5v9M3.5 8h9";
@@ -20,6 +21,9 @@ pub const STOP: &str = "M4.5 4.5h7v7h-7z";
 pub const PLAY: &str = "M5.5 3.5v9l7-4.5z";
 pub const MORE: &str = "M3.2 6.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 0 0 0-2.4zM8 6.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 0 0 0-2.4zM12.8 6.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 0 0 0-2.4z";
 pub const RESTART: &str = "M12.9 8a4.9 4.9 0 1 1-1.5-3.5M12.9 2.4v2.9H10";
+pub const BACK: &str = "M9.8 3.5L5.3 8l4.5 4.5";
+pub const DOWN: &str = "M8 3v9.5M4 8.5l4 4 4-4";
+pub const EXPAND: &str = "M9.5 2.5h4v4M13.5 2.5L9 7M6.5 13.5h-4v-4M2.5 13.5L7 9";
 pub const TRASH: &str = "M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.8 7v3.5M9.2 7v3.5";
 
 pub fn nav(view: crate::sim::View) -> &'static str {
@@ -29,6 +33,7 @@ pub fn nav(view: crate::sim::View) -> &'static str {
         Images => IMAGES,
         Volumes => VOLUMES,
         Networks => NETWORKS,
+        Builds => BUILDS,
         Machines => MACHINES,
         Kubernetes => KUBERNETES,
         Settings => SETTINGS,

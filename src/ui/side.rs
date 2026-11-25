@@ -54,6 +54,7 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
                 Some(s.imgs.iter().filter(|a| !a.gone).count()),
                 Some(s.vols.iter().filter(|a| !a.gone).count()),
                 Some(s.nets.iter().filter(|a| !a.gone).count()),
+                Some(s.builds.len()),
                 Some(s.ms.iter().filter(|a| !a.gone).count()),
                 None,
                 None,

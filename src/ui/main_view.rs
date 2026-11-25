@@ -3,7 +3,7 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{pos2, vec2, Align, Align2, Context, CursorIcon, Frame, Id, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, ViewportCommand};
 
-use super::{assets, containers, enter, kube, machines, settings, swap, Cx};
+use super::{assets, builds, containers, enter, kube, logs, machines, settings, swap, Cx};
 use crate::icons::{self, Ink};
 use crate::sim::{fmt_count, fmt_size, Banner, Engine, Filter, Job, ModalKind, Pane, St, State, View};
 use crate::theme::*;
@@ -16,6 +16,10 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
         let d = ui.interact(Rect::from_min_size(full.min, vec2(full.width(), 12.0)), Id::new("main-drag"), Sense::drag());
         if d.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if cx.s.page.is_some() {
+            logs::show(ui, cx);
+            return;
         }
         let view = cx.s.view;
         ScrollArea::vertical()
@@ -97,6 +101,7 @@ fn chrome(view: View) -> (&'static str, Option<&'static str>) {
         View::Images => ("Images", Some("Pull image")),
         View::Volumes => ("Volumes", Some("Create volume")),
         View::Networks => ("Networks", Some("Create network")),
+        View::Builds => ("Builds", None),
         View::Machines => ("Machines", Some("New machine")),
         View::Kubernetes => ("Kubernetes", None),
         View::Settings => ("Settings", None),
@@ -144,7 +149,7 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx) {
     }
 
     // Search
-    if (view == View::Containers || is_asset(view)) && !down {
+    if (view == View::Containers || view == View::Builds || is_asset(view)) && !down {
         let id = Id::new("search");
         let focused = ui.memory(|m| m.has_focus(id));
         let sw = cx.tw.f("search-w", if focused { 340.0 } else { 260.0 }, 0.35, Ease::OUT);
@@ -232,6 +237,18 @@ fn summary(s: &State, view: View) -> String {
         View::Networks => {
             let n = s.nets.iter().filter(|a| !a.gone).count();
             format!("{} · {} attached", fmt_count(n, "network"), fmt_count(s.alive().count(), "container"))
+        }
+        View::Builds => {
+            let failed = s.builds.iter().filter(|b| b.st == crate::sim::BuildSt::Failed).count();
+            let running = s.builds.iter().filter(|b| b.st == crate::sim::BuildSt::Running).count();
+            let mut parts = vec![fmt_count(s.builds.len(), "build")];
+            if running > 0 {
+                parts.push(format!("{running} running"));
+            }
+            if failed > 0 {
+                parts.push(format!("{failed} failed"));
+            }
+            parts.join(" · ")
         }
         View::Machines => "Linux machines that share one kernel with your containers.".into(),
         View::Kubernetes => "A single-node cluster for local development.".into(),
@@ -396,6 +413,29 @@ fn blocking(s: &State) -> Option<Block> {
             });
         }
     }
+    if view == View::Builds && (!s.is_live() || s.builds_seen) {
+        if !s.builds_err.is_empty() {
+            return Some(block(icons::BUILDS, "Build history isn't available", s.builds_err.clone(), "Try again", Box::new(|s| s.refresh_builds())));
+        }
+        if s.builds.is_empty() {
+            return Some(block(
+                icons::BUILDS,
+                "No builds yet",
+                "Images you build with docker build or Compose show up here, with their steps, cache hits and logs.",
+                "Refresh",
+                Box::new(|s| s.refresh_builds()),
+            ));
+        }
+        if !s.builds.iter().any(|b| builds::matches(b, &q)) {
+            return Some(block(
+                icons::SEARCH,
+                format!("No builds match “{}”", s.q.trim()),
+                format!("Check the spelling, or clear the search to see all {}.", s.builds.len()),
+                "Clear search",
+                Box::new(|s| s.q.clear()),
+            ));
+        }
+    }
     if is_asset(view) {
         let names: Vec<String> = match view {
             View::Images => s.imgs.iter().filter(|a| !a.gone).map(|a| a.n.clone()).collect(),
@@ -454,6 +494,8 @@ fn content(ui: &mut Ui, cx: &mut Cx) {
     match view {
         View::Containers => containers::show(ui, cx),
         View::Images | View::Volumes | View::Networks => assets::show(ui, cx),
+        View::Builds if cx.s.is_live() && !cx.s.builds_seen => skeleton(ui, cx),
+        View::Builds => builds::show(ui, cx),
         View::Machines => machines::show(ui, cx),
         View::Kubernetes => kube::show(ui, cx),
         View::Settings => settings::show(ui, cx),

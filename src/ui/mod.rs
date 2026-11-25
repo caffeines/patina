@@ -1,8 +1,10 @@
 //! The main window, view by view.
 
 pub mod assets;
+pub mod builds;
 pub mod containers;
 pub mod kube;
+pub mod logs;
 pub mod machines;
 pub mod main_view;
 pub mod overlays;

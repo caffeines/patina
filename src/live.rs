@@ -29,7 +29,7 @@ use tokio::sync::mpsc as tmpsc;
 use tokio::task::JoinHandle;
 
 use crate::engine::{self, config, control, integrate, paths};
-use crate::sim::{Asset, Net, St};
+use crate::sim::{Asset, Build, BuildInfo, BuildSt, Net, Page, St};
 
 // ------------------------------------------------------------------ protocol
 
@@ -69,6 +69,13 @@ pub enum Cmd {
     Config(String, String),
     ApplyResources { cpus: u32, mem_mib: u32 },
     OpenTerminal(String),
+    /// The Builds view opened or closed (it refreshes faster while open).
+    BuildsOpen(bool),
+    BuildInfo(String),
+    /// Stream a container's logs to the log page, from `tail` lines back.
+    OpenLogs { id: String, tail: Option<u32> },
+    OpenBuildLog(String),
+    CloseLogs,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -135,6 +142,11 @@ pub enum Ev {
     Disk(f64),
     /// An action finished. `key` says which; `msg` is a toast or an error.
     Done { key: String, ok: bool, msg: String },
+    /// The build history, or why it can't be read.
+    Builds(Result<Vec<Build>, String>),
+    BuildInfo { id: String, info: BuildInfo },
+    /// Lines for the log page showing `page`; `reset` replaces what it has.
+    PageLogs { page: Page, lines: Vec<(String, String, u8)>, reset: bool },
 }
 
 /// The UI's end of the connection.
@@ -305,6 +317,127 @@ fn log_lines(bytes: &[u8]) -> Vec<(String, String, u8)> {
         .collect()
 }
 
+/// Follow a container's logs for the log page, in batches so a long
+/// history arrives as a few big updates rather than thousands of small ones.
+async fn stream_page(d: Docker, out: Out, page: Page, id: String, tail: String, reset: bool) {
+    if reset {
+        out.send(Ev::PageLogs { page: page.clone(), lines: Vec::new(), reset: true });
+    }
+    let opts = LogsOptionsBuilder::new().stdout(true).stderr(true).timestamps(true).follow(true).tail(&tail).build();
+    let mut s = d.logs(&id, Some(opts));
+    let mut batch = Vec::new();
+    loop {
+        let ended = match tokio::time::timeout(Duration::from_millis(50), s.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                batch.extend(log_lines(&chunk.into_bytes()));
+                if batch.len() < 5000 {
+                    continue;
+                }
+                false
+            }
+            Ok(Some(Err(_)) | None) => true,
+            Err(_) => false, // quiet for a moment: send what we have
+        };
+        if !batch.is_empty() {
+            out.send(Ev::PageLogs { page: page.clone(), lines: std::mem::take(&mut batch), reset: false });
+        }
+        if ended {
+            break;
+        }
+    }
+}
+
+/// A build's log, read again every two seconds while the build runs.
+async fn build_log(out: Out, page: Page, id: String) {
+    loop {
+        let lines = match buildx(&["history", "logs", &id]).await {
+            Ok(text) => text.lines().map(|l| (String::new(), strip_ansi(l), classify(l))).collect(),
+            Err(e) => vec![(String::new(), e, 3)],
+        };
+        out.send(Ev::PageLogs { page: page.clone(), lines, reset: true });
+        let running = buildx(&["history", "inspect", &id, "--format", "json"])
+            .await
+            .ok()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .is_some_and(|v| v["Status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("running")));
+        if !running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+const NO_BUILDX: &str = "Patina reads build history through docker buildx, and it isn't installed. Add the buildx plugin, then refresh.";
+
+/// Run `docker buildx …` against Patina's engine with its current builder.
+async fn buildx(args: &[&str]) -> Result<String, String> {
+    let cmd = tokio::process::Command::new(paths::docker_cli())
+        .args(["--context", "patina", "buildx"])
+        .args(args)
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_HOST")
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(Duration::from_secs(20), cmd).await.map_err(|_| "docker buildx didn't answer.".to_string())?.map_err(|e| e.to_string())?;
+    if out.status.success() {
+        // `history logs` writes the log to stderr, like build progress.
+        let text = if out.stdout.is_empty() { &out.stderr } else { &out.stdout };
+        return Ok(String::from_utf8_lossy(text).into_owned());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("is not a docker command") || err.contains("unknown command") {
+        Err(NO_BUILDX.into())
+    } else {
+        Err(sentence(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("docker buildx failed")))
+    }
+}
+
+fn unix(ts: &serde_json::Value) -> Option<f64> {
+    chrono::DateTime::parse_from_rfc3339(ts.as_str()?).ok().map(|t| t.timestamp_millis() as f64 / 1000.0)
+}
+
+/// `docker buildx history ls --format json`: one JSON object per line.
+fn parse_builds(text: &str) -> Vec<Build> {
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map(|v| {
+            let created = unix(&v["created_at"]).unwrap_or(0.0);
+            let st = match v["status"].as_str().unwrap_or("").to_lowercase().as_str() {
+                "running" => BuildSt::Running,
+                "error" | "failed" => BuildSt::Failed,
+                "canceled" | "cancelled" => BuildSt::Canceled,
+                _ => BuildSt::Done,
+            };
+            let n = |k: &str| v[k].as_u64().unwrap_or(0) as u32;
+            Build {
+                id: v["ref"].as_str().unwrap_or("").rsplit('/').next().unwrap_or("").to_string(),
+                name: v["name"].as_str().unwrap_or("").to_string(),
+                st,
+                created: created as i64,
+                secs: unix(&v["completed_at"]).map_or(0.0, |c| (c - created).max(0.0)),
+                steps: n("total_steps"),
+                done_steps: n("completed_steps"),
+                cached: n("cached_steps"),
+                err: v["error"].as_str().map(str::to_string).unwrap_or_default(),
+            }
+        })
+        .filter(|b| !b.id.is_empty())
+        .collect()
+}
+
+/// `docker buildx history inspect --format json`.
+fn parse_build_info(json: &str) -> BuildInfo {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return BuildInfo::default() };
+    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let list = |k: &str| v[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let args = v["BuildArgs"]
+        .as_array()
+        .map(|a| a.iter().map(|x| format!("{}={}", x["Name"].as_str().unwrap_or(""), x["Value"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("  "))
+        .unwrap_or_default();
+    let err = v["Error"]["Message"].as_str().or_else(|| v["Error"].as_str()).unwrap_or("").to_string();
+    BuildInfo { dockerfile: s("Dockerfile"), context: s("Context"), platform: list("Platform"), repo: s("VCSRepository"), revision: s("VCSRevision"), args, err }
+}
+
 fn snap(c: &ContainerSummary) -> BoxSnap {
     let id = c.names.as_ref().and_then(|n| n.first()).map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
     let hex: String = c.id.clone().unwrap_or_default().chars().take(12).collect();
@@ -416,6 +549,12 @@ struct W {
     vol_sizes: Arc<std::sync::Mutex<HashMap<String, f64>>>,
     assets_busy: Arc<AtomicBool>,
     df_busy: Arc<AtomicBool>,
+    builds_busy: Arc<AtomicBool>,
+    builds_open: bool,
+    /// What the log page shows (and how far back), and its stream. The
+    /// stream is restarted when it's missing, e.g. after the engine restarts.
+    page: Option<(Page, Option<u32>)>,
+    page_task: Option<JoinHandle<()>>,
     last_down: Option<Instant>,
 }
 
@@ -433,6 +572,10 @@ async fn worker(mut rx: tmpsc::UnboundedReceiver<Cmd>, out: Out) {
         vol_sizes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         assets_busy: Arc::new(AtomicBool::new(false)),
         df_busy: Arc::new(AtomicBool::new(false)),
+        builds_busy: Arc::new(AtomicBool::new(false)),
+        builds_open: false,
+        page: None,
+        page_task: None,
         last_down: None,
     };
     // Existing installs from before PATH integration get it now (if enabled).
@@ -463,6 +606,9 @@ impl W {
             h.abort();
         }
         if let Some((_, h)) = self.logs.take() {
+            h.abort();
+        }
+        if let Some(h) = self.page_task.take() {
             h.abort();
         }
     }
@@ -517,6 +663,10 @@ impl W {
         self.out.send(Ev::Containers(boxes));
         self.sync_stats(&d);
         self.sync_logs(&d);
+        self.sync_page();
+        if first || forced || self.tick.is_multiple_of(if self.builds_open { 2 } else { 15 }) {
+            self.builds();
+        }
         if first || forced || self.tick % 3 == 0 {
             self.assets(&d);
         }
@@ -664,6 +814,51 @@ impl W {
         self.logs = Some((self.sel.clone(), h));
     }
 
+    /// Start the log page's stream when it has none. A container's stream
+    /// also ends when the container stops; it picks up again when it runs,
+    /// with only the new lines.
+    fn sync_page(&mut self) {
+        let Some((page, tail)) = self.page.clone() else { return };
+        let out = self.out.clone();
+        match (&page, &self.page_task) {
+            (Page::BuildLog(id), None) => self.page_task = Some(tokio::spawn(build_log(out, page.clone(), id.clone()))),
+            (Page::Logs(id), task) => {
+                let Some(d) = self.docker.clone() else { return };
+                let running = self.boxes.iter().any(|b| b.id == *id && matches!(b.st, St::Running | St::Starting));
+                let from = match task {
+                    None => Some((tail.map_or_else(|| "all".to_string(), |n| n.to_string()), true)),
+                    Some(h) if h.is_finished() && running => Some(("0".to_string(), false)),
+                    Some(_) => None,
+                };
+                if let Some((tail, reset)) = from {
+                    self.page_task = Some(tokio::spawn(stream_page(d, out, page.clone(), id.clone(), tail, reset)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_page(&mut self, page: Option<(Page, Option<u32>)>) {
+        if let Some(h) = self.page_task.take() {
+            h.abort();
+        }
+        self.page = page;
+        self.sync_page();
+    }
+
+    /// Build history, read through `docker buildx` off the main loop.
+    fn builds(&self) {
+        if self.builds_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (out, busy) = (self.out.clone(), self.builds_busy.clone());
+        tokio::spawn(async move {
+            let r = buildx(&["history", "ls", "--format", "json"]).await.map(|text| parse_builds(&text));
+            out.send(Ev::Builds(r));
+            busy.store(false, Ordering::SeqCst);
+        });
+    }
+
     async fn inspect_sel(&self, d: &Docker) {
         if self.sel.is_empty() || !self.boxes.iter().any(|b| b.id == self.sel) {
             return;
@@ -770,6 +965,22 @@ impl W {
         let out = self.out.clone();
         match cmd {
             Cmd::Refresh => {}
+            Cmd::BuildsOpen(open) => {
+                self.builds_open = open;
+                if open {
+                    self.builds();
+                }
+            }
+            Cmd::BuildInfo(id) => {
+                tokio::spawn(async move {
+                    if let Ok(json) = buildx(&["history", "inspect", &id, "--format", "json"]).await {
+                        out.send(Ev::BuildInfo { id, info: parse_build_info(&json) });
+                    }
+                });
+            }
+            Cmd::OpenLogs { id, tail } => self.open_page(Some((Page::Logs(id), tail))),
+            Cmd::OpenBuildLog(id) => self.open_page(Some((Page::BuildLog(id), None))),
+            Cmd::CloseLogs => self.open_page(None),
             Cmd::Select(id) => {
                 self.sel = id;
                 if let Some(d) = self.docker.clone() {
@@ -1173,6 +1384,32 @@ fn debug<T>(what: &str, r: &Result<T, DockerError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_build_history() {
+        let text = r#"{"cached_steps":12,"completed_at":"2026-11-25T17:40:05.5Z","completed_steps":23,"created_at":"2026-11-25T17:39:01.5Z","name":"shop/api","ref":"patina/patina/ui9vigsfu1fnzimhafuwc7po8","status":"Completed","total_steps":23}
+{"created_at":"2026-11-25T17:41:00Z","name":"shop/web","ref":"patina/patina/abc","status":"Running","total_steps":9,"completed_steps":4}
+{"created_at":"2026-11-25T17:30:00Z","completed_at":"2026-11-25T17:30:10Z","name":"shop/worker","ref":"patina/patina/def","status":"Error","error":"exit code: 1"}
+not json"#;
+        let b = parse_builds(text);
+        assert_eq!(b.len(), 3);
+        assert_eq!(b[0].id, "ui9vigsfu1fnzimhafuwc7po8");
+        assert_eq!((b[0].st, b[0].steps, b[0].cached), (BuildSt::Done, 23, 12));
+        assert!((b[0].secs - 64.0).abs() < 0.01);
+        assert_eq!((b[1].st, b[1].secs, b[1].done_steps), (BuildSt::Running, 0.0, 4));
+        assert_eq!((b[2].st, b[2].err.as_str()), (BuildSt::Failed, "exit code: 1"));
+    }
+
+    #[test]
+    fn reads_build_details() {
+        let json = r#"{"Name":"shop/api","Context":"code/shop","Dockerfile":"services/api/Dockerfile","VCSRepository":"git@github.com:acme/shop.git","VCSRevision":"53cb3fa2","Platform":["linux/amd64","linux/arm64"],"BuildArgs":[{"Name":"APP_VERSION","Value":"1.2"}],"Status":"completed"}"#;
+        let i = parse_build_info(json);
+        assert_eq!(i.dockerfile, "services/api/Dockerfile");
+        assert_eq!(i.platform, "linux/amd64, linux/arm64");
+        assert_eq!(i.args, "APP_VERSION=1.2");
+        assert!(i.err.is_empty());
+        assert_eq!(parse_build_info(r#"{"Error":{"Message":"exit code: 1"}}"#).err, "exit code: 1");
+    }
 
     #[test]
     fn splits_image_references() {

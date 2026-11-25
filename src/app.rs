@@ -375,6 +375,11 @@ impl eframe::App for App {
         if s.ov.is_none() && s.menu.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             s.menu = None;
         }
+        // Escape leaves the log page, unless it's clearing the filter's focus.
+        let filtering = ctx.memory(|m| m.has_focus(Id::new("page-q")));
+        if s.ov.is_none() && s.page.is_some() && !filtering && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            s.close_page();
+        }
         if s.ov.is_some() {
             ctx.memory_mut(|m| m.surrender_focus(Id::new("search")));
         }

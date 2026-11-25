@@ -288,10 +288,7 @@ fn context_menu(ctx: &Context, cx: &mut Cx, c: &Container, row: Rect, origin: Po
         }),
         item("View logs", true, {
             let id = id.clone();
-            move |s| {
-                s.pick(&id);
-                s.set_tab(Tab::Logs);
-            }
+            move |s| s.open_logs(&id)
         }),
         item("Copy ID", true, {
             let hex = hex.clone();
@@ -535,10 +532,19 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
             } else {
                 0.0
             };
+            let full = Btn::plain("Full log").h(26.0).pad(9.0).radius(7.0).font(sans(12.0)).color(MUTED).with_icon(icons::EXPAND, Ink::Stroke(1.4), 13.0);
+            let (fr, _) = full.at_right(&mut bui, body.right(), body.top() + 13.0, Id::new("full-log"));
+            if fr.clicked() {
+                let id = c0.id.clone();
+                cx.fx.push(Box::new(move |s| s.open_logs(&id)));
+            }
             let n = logs.len();
             let total_h = n as f32 * 22.0 - 5.0;
             for (i, l) in logs.iter().enumerate() {
                 let top = body.bottom() - total_h + i as f32 * 22.0 + shift;
+                if top < body.top() + 30.0 {
+                    continue;
+                }
                 let cy = top + 8.5;
                 let mut lp = bp.clone();
                 if i + 1 == n && lt < 1.0 {

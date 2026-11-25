@@ -1,12 +1,40 @@
 # Patina
 
-A native desktop app for containers and Linux machines, written in Rust with
-[egui/eframe](https://github.com/emilk/egui). It is built from the *Patina desktop UI*
-design: the same layout, colors, type, copy and motion.
+Containers for your Mac: a self-contained alternative to Docker Desktop and OrbStack, written in
+Rust. The app is built with [egui/eframe](https://github.com/emilk/egui) from the *Patina desktop
+UI* design: the same layout, colors, type, copy and motion.
 
-The engine is **simulated**, just like in the design prototype. Containers start and stop, CPU and
-memory move, logs stream, images pull layer by layer and Kubernetes boots its pods. None of it
-touches Docker on this machine.
+Patina doesn't use any other container app. It runs its **own engine**: Docker Engine inside a
+small Linux VM that Patina boots itself with Apple's Virtualization framework.
+
+## How the engine works
+
+```
+ Patina.app ──┐                       ┌── Linux VM (Debian 13, Virtualization.framework) ──┐
+              │ ~/.patina/run/        │                                                     │
+ docker CLI ──┼─ docker.sock ── vsock 2375 ── socat ── /run/docker.sock ── Docker Engine     │
+              │                       │                                                     │
+ localhost:N ─┼─ port forwarder ─ vsock 2376 ── socat ── 127.0.0.1:N (published ports)      │
+              │                       │                                                     │
+ ~/ (home) ───┼──────── virtiofs ─────┼── mounted at the same path, so -v ~/code:/src works │
+ Rosetta ─────┼──────── virtiofs ─────┼── registered with binfmt_misc for linux/amd64       │
+              └───────────────────────┴─────────────────────────────────────────────────────┘
+```
+
+- **Setup** (first launch, or `patina engine setup`) downloads Debian's official arm64 cloud image
+  and checks it against Debian's published SHA-512. It grows the image into a 64 GB sparse disk
+  (only used space takes room), points the boot loader at the virtio console, and writes a
+  first-boot seed. It also installs the `docker` and `docker-compose` commands into
+  `~/.patina/bin` and adds a `patina` docker context, without switching your current one.
+- **First boot** installs Docker Engine in the guest with cloud-init (about 2–3 minutes).
+  Later boots take about 4 seconds; shutting down takes about 2.
+- **The helper** (`patina engine run`) owns the VM. It keeps running after the app quits, like a
+  system service. To get the virtualization entitlement, the app keeps an ad-hoc-signed copy of
+  itself in `~/.patina/bin/patina-engine`.
+
+Everything lives in `~/.patina`: `vm/` (disk, EFI variables, seed), `bin/` (docker,
+docker-compose, the helper), `run/` (sockets), `logs/` (`engine.log`, `console.log`), and
+`config.json`.
 
 ## Run
 
@@ -14,47 +42,56 @@ touches Docker on this machine.
 cargo run --release
 ```
 
-The first launch shows the first-run flow. After that, the app opens straight to the main window.
+The first launch walks through setup. After that, the app opens to the main window and starts the
+engine. You can turn that off in Settings › General.
 
-Build a double-clickable macOS app (with icon) into `target/Patina.app`:
+To use the engine from a terminal:
+
+```sh
+export PATH="$HOME/.patina/bin:$PATH"
+docker context use patina        # or: DOCKER_HOST=unix://$HOME/.patina/run/docker.sock
+docker run --rm hello-world
+```
+
+The engine also has a command line:
+
+```sh
+patina engine setup     # download and prepare everything
+patina engine start     # boot the VM in the background
+patina engine status    # starting | booting | installing | running | stopping
+patina engine stop      # shut the guest down cleanly
+patina engine reset     # delete the VM disk (keeps downloads); run setup again after
+```
+
+To build a double-clickable app into `target/Patina.app`, and to run the tests:
 
 ```sh
 ./scripts/bundle-macos.sh
-```
-
-Run the engine tests:
-
-```sh
 cargo test
 ```
 
-## What's in it
+## What works
 
-- **Containers:** grouped by Compose project, with live CPU sparklines, filtering and search.
-  Start, stop, pause, restart and delete (with undo). A row menu, plus a detail panel with logs,
-  a terminal and details.
-- **Images, Volumes, Networks:** size bars, which container uses each one, pull with per-layer
-  progress, prune unused images, create volumes and networks. Deleting something that is still in
-  use is blocked.
-- **Machines:** Ubuntu, Debian, Fedora, Arch or Alpine machines with a small live shell.
-- **Kubernetes:** a cluster switch, a staged boot, and the kube-system pods.
-- **Settings:** General, Resources (CPU and memory sliders with "Apply and restart"), Network,
-  Engine and About.
-- **Engine card:** boot progress ring, memory use, Restart and Start/Stop.
-- **Command palette:** `⌘K` (or `Ctrl K`). Use ↑ ↓ to move, Enter to run, Esc to close.
-- **Cases:** engine stopped, engine failed (with boot log), loading skeleton, empty states, no
-  search matches, update banner, disk-almost-full banner, registry unreachable.
+- **Containers:** grouped by Compose project, with live CPU sparklines, real logs, and real exit
+  reasons (out of memory, exit codes, health checks). Start, stop, pause, restart and delete.
+  Run image (pulls when needed, with port mapping), open in browser, and open a terminal
+  (`docker exec` in Terminal.app).
+- **Images, volumes, networks:** sizes, which container uses each one, pulls with per-layer
+  progress, prune, create and delete. Deleting something still in use is blocked.
+- **Engine card:** boot progress and memory use, plus Start, Stop and Restart.
+- **Settings:** CPU and memory limits (applied with a restart), Rosetta, open at login, start
+  on launch.
+- **Command palette:** `⌘K`.
 
-## Open a specific design board
+**Not built yet:** Linux machines and Kubernetes. Those views say so. The menu bar popover from
+the design isn't built either.
 
-Each board in the design can be opened from the command line:
+`--demo` runs the simulated engine from the design instead, with nothing touching Docker:
 
 ```sh
-cargo run -- --scenario trouble            # containers needing attention
-cargo run -- --show run --phase conflict   # run dialog, port already in use
-cargo run -- --view images --show pull     # pull in progress
-cargo run -- --view settings --pane resources --phase dirty
-cargo run -- --onboarding --step 3         # first run, "Bring your work"
+cargo run -- --demo
+cargo run -- --scenario trouble            # containers needing attention (simulated)
+cargo run -- --show run --phase conflict   # run dialog, port in use (simulated)
 cargo run -- --help                        # every option
 ```
 
@@ -62,18 +99,18 @@ cargo run -- --help                        # every option
 
 | File | What it holds |
 | --- | --- |
-| `src/sim.rs` | The engine model and every action (start, stop, pull, prune and the rest). It's a port of the prototype's logic, with tests. |
-| `src/ui/` | One module per view: `side`, `main_view`, `containers`, `assets`, `machines`, `kube`, `settings`, `overlays` |
-| `src/onboarding.rs` | The 4-step first-run flow |
-| `src/widgets.rs` | Buttons, switches, segmented controls, status dots, rings, sheen, shimmer |
-| `src/tween.rs` | CSS-style transitions with cubic-bezier easing |
-| `src/icons.rs` | The design's SVG icon paths |
-| `src/theme.rs` | Colors and fonts |
+| `src/engine/vm.rs` | The VM: Virtualization.framework through objc2 (EFI boot, disks, NAT, virtio console, vsock, virtiofs, Rosetta) |
+| `src/engine/daemon.rs` | `patina engine run`: Docker socket proxy, port forwarding, status and stop |
+| `src/engine/setup.rs` | Downloads, checksum check, disk and boot loader, the docker CLI |
+| `src/engine/guest.rs` | The guest's first-boot provisioning (cloud-init) |
+| `src/engine/control.rs` | The app's side: start, stop, status |
+| `src/live.rs` | The app's Docker API client (bollard): polling, stats and log streams, actions |
+| `src/sim.rs` | App state and every action; the simulated engine for `--demo` |
+| `src/ui/`, `src/onboarding.rs` | The views and the first-run flow |
+| `src/widgets.rs`, `src/tween.rs`, `src/icons.rs`, `src/theme.rs` | Drawing, animation, icons, colors and fonts |
 
-To connect a real Docker engine, replace the methods on `State` in `sim.rs`. The views only call
-those methods.
-
-The menu bar popover from the design is not built yet.
+Set `PATINA_DEBUG=1` to print Docker API errors. The guest's boot log is in
+`~/.patina/logs/console.log`.
 
 ## Fonts
 

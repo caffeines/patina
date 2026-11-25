@@ -2,8 +2,10 @@
 //!
 //! With the real engine, setup does the work: it installs the `docker`
 //! command, builds the VM disk from Debian's cloud image, and starts the
-//! engine, reporting progress as it goes. In `--demo` mode it plays the
-//! design's simulated flow, including "Bring your work".
+//! engine, reporting progress as it goes. When Docker Desktop, Colima or
+//! OrbStack is on this Mac, "Bring your work" offers to copy its images,
+//! volumes and containers. In `--demo` mode it plays the design's simulated
+//! flow.
 
 use std::f32::consts::PI;
 use std::sync::mpsc;
@@ -11,7 +13,7 @@ use std::time::Duration;
 
 use egui::{pos2, vec2, Align2, Context, Frame, Id, Rect, Sense, Stroke, UiBuilder, ViewportCommand};
 
-use crate::engine::{control, setup as engine_setup};
+use crate::engine::{control, migrate, setup as engine_setup};
 use crate::sim::St;
 use crate::theme::*;
 use crate::tween::{rise, Ease, Tweens};
@@ -31,6 +33,24 @@ enum SetupMsg {
     Note(usize, String),
     Done(usize),
     Fail(usize, String),
+}
+
+/// Finding another engine, and importing from it.
+enum MigMsg {
+    Found(Option<migrate::Source>),
+    Note(f64, String),
+    Done(Result<migrate::Summary, String>),
+}
+
+fn spawn_mig(ctx: egui::Context, job: impl FnOnce(&dyn Fn(MigMsg)) + Send + 'static) -> mpsc::Receiver<MigMsg> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        job(&|m| {
+            let _ = tx.send(m);
+            ctx.request_repaint();
+        })
+    });
+    rx
 }
 
 struct Reporter {
@@ -114,6 +134,11 @@ pub struct Onb {
     rx: Option<mpsc::Receiver<SetupMsg>>,
     notes: [String; 3],
     failed: Option<String>,
+    /// Another engine to import from (live only).
+    source: Option<migrate::Source>,
+    mig_rx: Option<mpsc::Receiver<MigMsg>>,
+    mig_note: String,
+    mig_err: Option<String>,
 }
 
 const COMMAND: &str = "docker run --rm hello-world";
@@ -147,7 +172,14 @@ impl Onb {
             rx: None,
             notes: Default::default(),
             failed: None,
+            source: None,
+            mig_rx: None,
+            mig_note: String::new(),
+            mig_err: None,
         };
+        if live {
+            o.detect();
+        }
         if step == 2 {
             o.run_setup();
         }
@@ -179,6 +211,42 @@ impl Onb {
         }
     }
 
+    fn on_mig(&mut self, m: MigMsg) {
+        match m {
+            MigMsg::Found(s) => {
+                self.source = s;
+                if self.source.is_none() && self.step == 3 {
+                    self.go_step(4);
+                }
+            }
+            MigMsg::Note(f, n) => {
+                self.mp = f;
+                self.mig_note = n;
+            }
+            MigMsg::Done(Ok(s)) => {
+                self.mig = Mig::Done;
+                self.mp = 1.0;
+                self.mig_note = format!("Copied {} images, {} volumes and {} containers (stopped).", s.images, s.volumes, s.containers);
+                self.mig_err = (!s.failed.is_empty()).then(|| {
+                    let more = if s.failed.len() > 3 { format!(" and {} more", s.failed.len() - 3) } else { String::new() };
+                    format!("Couldn't copy {}{more}.", s.failed[..s.failed.len().min(3)].join("; "))
+                });
+            }
+            MigMsg::Done(Err(e)) => {
+                self.mig = Mig::Idle;
+                self.mp = 0.0;
+                self.mig_err = Some(e);
+            }
+        }
+    }
+
+    /// Look for Docker Desktop, Colima or OrbStack in the background.
+    fn detect(&mut self) {
+        if let Some(ctx) = self.ctx.clone() {
+            self.mig_rx = Some(spawn_mig(ctx, |send| send(MigMsg::Found(migrate::detect()))));
+        }
+    }
+
     pub fn next_due(&self) -> Option<f64> {
         self.timers.iter().map(|t| t.0).reduce(f64::min)
     }
@@ -188,6 +256,10 @@ impl Onb {
         let msgs: Vec<SetupMsg> = self.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for m in msgs {
             self.on_msg(m);
+        }
+        let msgs: Vec<MigMsg> = self.mig_rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for m in msgs {
+            self.on_mig(m);
         }
         let mut due = Vec::new();
         let mut i = 0;
@@ -209,6 +281,9 @@ impl Onb {
         self.step_at = self.time;
         if step == 2 {
             self.run_setup();
+        }
+        if step == 3 && self.live && self.mig == Mig::Idle {
+            self.detect();
         }
     }
 
@@ -242,6 +317,22 @@ impl Onb {
 
     fn start_import(&mut self) {
         if self.mig != Mig::Idle {
+            return;
+        }
+        if self.live {
+            let (Some(ctx), Some(src)) = (self.ctx.clone(), self.source.clone()) else { return };
+            if !src.running {
+                self.detect();
+                return;
+            }
+            self.mig = Mig::Busy;
+            self.mp = 0.0;
+            self.mig_err = None;
+            self.mig_note = format!("Connecting to {}", src.name);
+            self.mig_rx = Some(spawn_mig(ctx, move |send| {
+                let r = migrate::run(&src, &|f, n| send(MigMsg::Note(f, n.to_string())));
+                send(MigMsg::Done(r));
+            }));
             return;
         }
         self.mig = Mig::Busy;
@@ -300,7 +391,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         w::pie(&ip, c, 60.0, -PI / 4.0, frac * std::f32::consts::TAU, VERDIGRIS);
 
         let mut y = ill_top + 220.0 + 26.0;
-        let labels: &[(&str, usize)] = if o.live {
+        let labels: &[(&str, usize)] = if o.live && o.source.is_none() {
             &[("Welcome", 1), ("Set up", 2), ("Ready", 4)]
         } else {
             &[("Welcome", 1), ("Set up", 2), ("Bring your work", 3), ("Ready", 4)]
@@ -341,17 +432,36 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         let mut mui = ui.new_child(UiBuilder::new().max_rect(main));
         mui.multiply_opacity(sa);
         let mp = mui.painter().clone();
-        let live_text = [
-            (
-                "Welcome",
-                "Containers for your Mac",
-                "Patina runs Docker Engine in its own small Linux virtual machine, with no other apps needed. Setup downloads Debian and the docker command, then starts the engine.",
-            ),
-            ("Step 2 of 3", "Setting things up", "This runs once and takes a few minutes. Patina downloads about 400 MB."),
-            ("", "", ""),
-            ("Step 3 of 3", "Patina is ready", "Docker Engine is running in Patina's own VM. Put Patina's tools on your PATH, then use docker as usual."),
-        ];
-        let text = if o.live { live_text[o.step - 1] } else { [
+        let src_name = o.source.as_ref().map_or("", |s| s.name.as_str());
+        let src_running = o.source.as_ref().is_some_and(|s| s.running);
+        let owned: (String, String, String);
+        let text: (&str, &str, &str) = if o.live {
+            let n = if o.source.is_some() { 4 } else { 3 };
+            owned = match o.step {
+                1 => (
+                    "Welcome".into(),
+                    "Containers for your Mac".into(),
+                    "Patina runs Docker Engine in its own small Linux virtual machine, with no other apps needed. Setup downloads Debian (and the docker command, if this Mac doesn't have one), then starts the engine.".into(),
+                ),
+                2 => (format!("Step 2 of {n}"), "Setting things up".into(), "This runs once and takes a few minutes. Patina downloads about 400 MB.".into()),
+                3 if src_running => (
+                    "Step 3 of 4".into(),
+                    "Bring your work along".into(),
+                    format!("{src_name} is on this Mac. Patina can copy its images, volumes and containers, so you pick up where you left off."),
+                ),
+                3 => (
+                    "Step 3 of 4".into(),
+                    "Bring your work along".into(),
+                    format!("{src_name} is on this Mac but isn't running. Open it, then check again to copy its images, volumes and containers."),
+                ),
+                _ => (
+                    format!("Step {n} of {n}"),
+                    "Patina is ready".into(),
+                    "Docker Engine is running in Patina's own VM. Put Patina's tools on your PATH, then use docker as usual.".into(),
+                ),
+            };
+            (&owned.0, &owned.1, &owned.2)
+        } else { [
             (
                 "Welcome",
                 "Containers and Linux machines for your Mac",
@@ -438,7 +548,12 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 let x = card.left() + 20.0;
                 let iw = card.width() - 40.0;
                 let col_w = (iw - 32.0) / 3.0;
-                for (i, (n, label)) in [("9", "containers"), ("14", "images"), ("6", "volumes")].into_iter().enumerate() {
+                let counts = match &o.source {
+                    Some(s) if o.live && s.running => [s.containers, s.images, s.volumes].map(|n| n.to_string()),
+                    _ if o.live => ["–", "–", "–"].map(String::from),
+                    _ => ["9", "14", "6"].map(String::from),
+                };
+                for (i, (n, label)) in counts.iter().map(String::as_str).zip(["containers", "images", "volumes"]).enumerate() {
                     let cx0 = x + i as f32 * (col_w + 16.0);
                     let ng = w::g_ls(&mui, n, mono(24.0), TEXT, -0.72);
                     w::put(&mp, &ng, pos2(cx0, card.top() + 20.0 + 16.0), Align2::LEFT_CENTER);
@@ -448,12 +563,20 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 let fw = tw.f("onb-mig", o.mp as f32, 0.5, Ease::STD);
                 let bc = tw.c("onb-mig-c", if o.mig == Mig::Done { VERDIGRIS } else { COPPER }, 0.7);
                 w::bar(&mp, Rect::from_min_size(pos2(x, by), vec2(iw, 3.0)), fw, bc, TRACK);
-                let note = match o.mig {
-                    Mig::Done => "Imported. Docker Desktop was left as it was.",
-                    Mig::Busy => "Copying images and volumes",
-                    Mig::Idle => "Nothing is changed in Docker Desktop.",
+                let note = match (o.live, o.mig) {
+                    (true, Mig::Done | Mig::Busy) => o.mig_note.clone(),
+                    (true, Mig::Idle) if src_running => format!("Nothing is changed in {src_name}."),
+                    (true, Mig::Idle) => format!("Open {src_name}, then check again."),
+                    (false, Mig::Done) => "Imported. Docker Desktop was left as it was.".into(),
+                    (false, Mig::Busy) => "Copying images and volumes".into(),
+                    (false, Mig::Idle) => "Nothing is changed in Docker Desktop.".into(),
                 };
-                w::text(&mp, &mui, x, by + 3.0 + 18.0 + 9.0, note, sans(12.5), MUTED);
+                let ng = w::g_elide(&mui, &note, sans(12.5), MUTED, iw);
+                w::put(&mp, &ng, pos2(x, by + 3.0 + 18.0 + 9.0), Align2::LEFT_CENTER);
+                if let Some(err) = o.mig_err.as_ref().filter(|_| o.live) {
+                    let eg = w::g_wrap(&mui, err, sans(12.5), DANGER_TEXT, main.width(), 17.5);
+                    mp.galley(pos2(main.left(), card.bottom() + 16.0), eg, DANGER_TEXT);
+                }
             }
             4 => {
                 let r = Rect::from_min_size(pos2(main.left(), y), vec2(main.width(), 46.0));
@@ -480,10 +603,13 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         // ---- footer
         let fy = main.bottom() - 18.0;
         let mut fui = ui.new_child(UiBuilder::new().max_rect(main));
-        if o.step > 1 {
+        if o.step > 1 && !(o.step == 3 && o.mig == Mig::Busy) {
             let (r, _) = Btn::ghost("Back").h(36.0).radius(10.0).at_left(&mut fui, main.left(), fy, Id::new("onb-back"));
             if r.clicked() {
-                let s = if o.live && o.step == 4 { 2 } else { o.step - 1 };
+                let s = match o.step {
+                    4 if o.live && o.source.is_none() => 2,
+                    s => s - 1,
+                };
                 next = Some(Box::new(move |o: &mut Onb| o.go_step(s)));
             }
         }
@@ -495,6 +621,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 (1, _) => "Get started",
                 (3, Mig::Done) => "Continue",
                 (3, Mig::Busy) => "Importing",
+                (3, Mig::Idle) if o.live && !src_running => "Check again",
                 (3, Mig::Idle) => "Import",
                 _ => "Continue",
             };
@@ -510,7 +637,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                     } else if step == 3 && mig == Mig::Idle {
                         o.start_import()
                     } else if live && step == 2 {
-                        o.go_step(4)
+                        o.go_step(if o.source.is_some() { 3 } else { 4 })
                     } else {
                         o.go_step(step + 1)
                     }

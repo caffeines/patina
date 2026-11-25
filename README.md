@@ -91,12 +91,21 @@ build from source; it says so if they're out of date.
 To release a version: set `version` in `Cargo.toml`, commit, then tag and push it here:
 
 ```sh
-git tag v0.2.0
-git push origin main v0.2.0
+git tag v0.3.0
+git push origin main v0.3.0
+git rev-parse v0.3.0    # the commit, for the formula
 ```
 
-Then set the same tag in the tap's `Formula/patina.rb` and push that. `brew upgrade patina`
-picks it up.
+Then, in the tap's `Formula/patina.rb`, set the same tag and that commit, and push it:
+
+```ruby
+url "https://github.com/caffeines/patina.git",
+    tag:      "v0.3.0",
+    revision: "<the commit from git rev-parse>"
+```
+
+The revision pins the build to that commit even if the tag is moved. `brew update && brew
+upgrade patina` picks it up.
 
 ## Release a DMG
 

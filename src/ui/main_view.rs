@@ -22,24 +22,37 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
             return;
         }
         let view = cx.s.view;
-        ScrollArea::vertical()
+        let (a, dy) = swap(cx.tw, cx.s.view_at, 0.45);
+        // Banner, toolbar and header stay put; only the content scrolls. The
+        // swap's rise is taken back out below the header so its height holds.
+        Frame::new().inner_margin(Margin { left: 28, right: 28, top: 12, bottom: 0 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            banner(ui, cx);
+            ui.multiply_opacity(a);
+            ui.add_space(dy);
+            toolbar(ui, cx);
+            ui.add_space(22.0);
+            header(ui, cx);
+            ui.add_space(14.0 - dy);
+        });
+        let out = ScrollArea::vertical()
             .id_salt(("main-scroll", view.slug()))
             .auto_shrink([false, false])
             .drag_to_scroll(false)
             .show(ui, |ui| {
-                Frame::new().inner_margin(Margin { left: 28, right: 28, top: 12, bottom: 28 }).show(ui, |ui| {
+                Frame::new().inner_margin(Margin { left: 28, right: 28, top: 8, bottom: 28 }).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    banner(ui, cx);
-                    let (a, dy) = swap(cx.tw, cx.s.view_at, 0.45);
                     ui.multiply_opacity(a);
                     ui.add_space(dy);
-                    toolbar(ui, cx);
-                    ui.add_space(22.0);
-                    header(ui, cx);
-                    ui.add_space(22.0);
                     content(ui, cx);
                 });
             });
+        // A hairline under the header once content slides beneath it.
+        let under = (out.state.offset.y / 12.0).clamp(0.0, 1.0);
+        if under > 0.0 {
+            let y = out.inner_rect.top() + 0.5;
+            ui.painter().line_segment([pos2(full.left(), y), pos2(full.right(), y)], Stroke::new(1.0_f32, HAIRLINE.gamma_multiply(under)));
+        }
     });
 }
 

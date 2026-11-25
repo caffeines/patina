@@ -6,7 +6,8 @@ use egui::text::{LayoutJob, TextFormat};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
 
 use super::{enter, Cx};
-use crate::engine::kube::{fmt_bytes, fmt_cpu, Health, Obj};
+use crate::engine::kube::{can_scale, fmt_bytes, fmt_cpu, Health, Obj};
+use crate::icons::{self, Ink};
 use crate::sim::{KTab, Kube, ModalKind, St};
 use crate::theme::*;
 use crate::tween::Ease;
@@ -239,9 +240,10 @@ fn table(ui: &mut Ui, cx: &mut Cx, at: egui::Pos2, wd: f32) -> f32 {
     tui.multiply_opacity(a);
     let p = tui.painter().clone();
 
-    // Columns: dot 22 | name (flex) | the tab's | age 52
+    // Columns: dot 22 | name (flex) | the tab's | age 40 | scale, delete
     let x = rect.left() + 14.0;
-    let age_r = rect.right() - 14.0;
+    let act_w = 64.0;
+    let age_r = rect.right() - 14.0 - act_w;
     let fixed: f32 = cols.iter().map(|c| c.1 + 12.0).sum::<f32>() + 40.0;
     let name_x = x + 22.0 + 12.0;
     let name_w = (age_r - fixed - name_x).max(120.0);
@@ -308,6 +310,24 @@ fn table(ui: &mut Ui, cx: &mut Cx, at: egui::Pos2, wd: f32) -> f32 {
         }
         let ag = if o.created > 0 { age(now - o.created) } else { "—".into() };
         w::text_right(&p, &tui, age_r, cy, &ag, mono(12.0), TEXT2);
+
+        // Actions, once the API has listed the object (not the fallback list).
+        if cx.s.ksnap.is_some() {
+            let del = Rect::from_min_size(pos2(rect.right() - 8.0 - 30.0, cy - 15.0), vec2(30.0, 30.0));
+            let r = Btn::icon(icons::TRASH, Ink::Stroke(1.3)).color(MUTED).at(&mut tui, del, Id::new(("kdel", o.kind, &o.ns, &o.name)));
+            if r.clicked() {
+                let (kind, ns, name) = (o.kind, o.ns.clone(), o.name.clone());
+                cx.fx.push(Box::new(move |s| s.ask_kube_delete(kind, &ns, &name)));
+            }
+            if can_scale(o.kind) {
+                let sc = del.translate(vec2(-32.0, 0.0));
+                let r = Btn::icon(icons::SCALE, Ink::Stroke(1.4)).color(MUTED).at(&mut tui, sc, Id::new(("kscale", o.kind, &o.ns, &o.name)));
+                if r.clicked() {
+                    let (kind, ns, name, now) = (o.kind, o.ns.clone(), o.name.clone(), o.cols.get(1).cloned().unwrap_or_default());
+                    cx.fx.push(Box::new(move |s| s.ask_kube_scale(kind, &ns, &name, &now)));
+                }
+            }
+        }
         y += row_h;
     }
     h + dy

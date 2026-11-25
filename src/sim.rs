@@ -265,6 +265,10 @@ pub enum ModalKind {
     Network,
     Reset,
     Pull,
+    /// Delete a Kubernetes object; the target is `kind|namespace|name`.
+    KubeDelete,
+    /// Scale a deployment or stateful set; the target is `kind|namespace|name`.
+    KubeScale,
 }
 
 #[derive(Clone, Debug)]
@@ -485,6 +489,25 @@ pub fn fmt_size(mb: f64) -> String {
         format!("{:.1} GB", mb / 1000.0)
     } else {
         format!("{} MB", mb.round() as i64)
+    }
+}
+
+/// `kind|namespace|name`, as Kubernetes dialogs carry their target.
+fn kube_target(t: &str) -> (&str, &str, &str) {
+    let mut p = t.splitn(3, '|');
+    (p.next().unwrap_or(""), p.next().unwrap_or(""), p.next().unwrap_or(""))
+}
+
+/// A kind as a sentence says it: "deployment", "volume claim".
+pub fn kind_word(kind: &str) -> String {
+    match kind {
+        "PersistentVolumeClaim" => "volume claim".into(),
+        "PersistentVolume" => "volume".into(),
+        "ConfigMap" => "config map".into(),
+        "StatefulSet" => "stateful set".into(),
+        "DaemonSet" => "daemon set".into(),
+        "CronJob" => "cron job".into(),
+        k => k.to_lowercase(),
     }
 }
 
@@ -1113,6 +1136,17 @@ impl State {
             }
             "menu" => s.toggle_menu("api"),
             "logs" => s.open_logs("web"),
+            "kubescale" | "kubedelete" => {
+                s.view = View::Kubernetes;
+                s.kube = Kube::On;
+                s.ksnap = Some(demo_kube());
+                if show == "kubescale" {
+                    s.ktab = KTab::Workloads;
+                    s.ask_kube_scale("Deployment", "shop", "web", "2/2");
+                } else {
+                    s.ask_kube_delete("Deployment", "kube-system", "coredns");
+                }
+            }
             "buildlog" => {
                 s.view = View::Builds;
                 s.open_build_log("w8q2n5v7c1k9x3m6p0r4t2yzb");
@@ -1468,6 +1502,53 @@ impl State {
         if !self.build_info.contains_key(id) {
             self.send(LCmd::BuildInfo(id.to_string()));
         }
+    }
+
+    /// Confirm deleting a Kubernetes object.
+    pub fn ask_kube_delete(&mut self, kind: &str, ns: &str, name: &str) {
+        self.ask_modal(ModalKind::KubeDelete, &format!("{kind}|{ns}|{name}"));
+    }
+
+    /// Ask how many replicas a deployment or stateful set should run,
+    /// starting from what it asks for now.
+    pub fn ask_kube_scale(&mut self, kind: &str, ns: &str, name: &str, now: &str) {
+        self.ask_modal(ModalKind::KubeScale, &format!("{kind}|{ns}|{name}"));
+        self.modal.value = now.rsplit('/').next().unwrap_or("").to_string();
+    }
+
+    fn kube_delete(&mut self) {
+        let target = self.modal.target.clone();
+        let (kind, ns, name) = kube_target(&target);
+        self.close_ov();
+        if self.is_live() {
+            self.send(LCmd::KubeDelete { kind: kind.into(), ns: ns.into(), name: name.into() });
+            return;
+        }
+        // The demo: the object goes, and a workload's pods with it.
+        if let Some(snap) = self.ksnap.as_mut() {
+            let owns = matches!(kind, "Deployment" | "StatefulSet" | "DaemonSet" | "Job");
+            snap.objs.retain(|o| !(o.ns == ns && (o.kind == kind && o.name == name || owns && o.kind == "Pod" && o.name.starts_with(&format!("{name}-")))));
+        }
+        self.toast_say(format!("Deleted {} {name}", kind_word(kind)), "", None);
+    }
+
+    fn kube_scale(&mut self) {
+        let Ok(n) = self.modal.value.trim().parse::<u32>().map_err(|_| ()).and_then(|n| if n <= 100 { Ok(n) } else { Err(()) }) else {
+            self.modal.err = "Enter a whole number from 0 to 100.".into();
+            return;
+        };
+        let target = self.modal.target.clone();
+        let (kind, ns, name) = kube_target(&target);
+        self.close_ov();
+        if self.is_live() {
+            self.send(LCmd::KubeScale { kind: kind.into(), ns: ns.into(), name: name.into(), replicas: n });
+            return;
+        }
+        if let Some(o) = self.ksnap.as_mut().and_then(|s| s.objs.iter_mut().find(|o| o.kind == kind && o.ns == ns && o.name == name)) {
+            o.cols[1] = format!("{n}/{n}");
+            o.health = if n == 0 { crate::engine::kube::Health::Idle } else { crate::engine::kube::Health::Good };
+        }
+        self.toast_say(format!("Scaled {name} to {n}"), "", None);
     }
 
     /// Read the build history again now.
@@ -2609,6 +2690,41 @@ impl State {
                     yes: "Remove".into(),
                     danger: true,
                     go: Box::new(|s| s.prune_images()),
+                    ..base
+                }
+            }
+            ModalKind::KubeDelete => {
+                let (kind, ns, name) = kube_target(&t);
+                let what = match kind {
+                    "Pod" => "If a deployment or another controller owns it, a new pod takes its place.",
+                    "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob" => "Its pods are deleted too.",
+                    "PersistentVolumeClaim" | "PersistentVolume" => "Depending on the storage class, the data on the volume may be deleted too.",
+                    _ => "It's removed from the cluster.",
+                };
+                let system = if ["kube-system", "kube-public", "kube-node-lease"].contains(&ns) {
+                    " It's part of the cluster itself, so deleting it can break the cluster."
+                } else {
+                    ""
+                };
+                ModalSpec {
+                    title: format!("Delete {} {name}?", kind_word(kind)),
+                    body: format!("{what}{system}"),
+                    yes: "Delete".into(),
+                    danger: true,
+                    go: Box::new(|s| s.kube_delete()),
+                    ..base
+                }
+            }
+            ModalKind::KubeScale => {
+                let (kind, _, name) = kube_target(&t);
+                ModalSpec {
+                    title: format!("Scale {name}"),
+                    body: format!("Set how many replicas of this {} run. 0 stops it without deleting it.", kind_word(kind)),
+                    field: true,
+                    label: "Replicas",
+                    ph: "3",
+                    yes: "Scale".into(),
+                    go: Box::new(|s| s.kube_scale()),
                     ..base
                 }
             }

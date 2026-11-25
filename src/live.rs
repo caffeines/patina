@@ -73,6 +73,8 @@ pub enum Cmd {
     BuildsOpen(bool),
     /// The same for the Kubernetes view.
     KubeOpen(bool),
+    KubeDelete { kind: String, ns: String, name: String },
+    KubeScale { kind: String, ns: String, name: String, replicas: u32 },
     BuildInfo(String),
     /// Stream a container's logs to the log page, from `tail` lines back.
     OpenLogs { id: String, tail: Option<u32> },
@@ -1011,6 +1013,20 @@ impl W {
         let out = self.out.clone();
         match cmd {
             Cmd::Refresh => {}
+            Cmd::KubeDelete { kind, ns, name } => {
+                tokio::spawn(async move {
+                    let what = format!("{} {name}", crate::sim::kind_word(&kind));
+                    let r = blocking(move || engine::kube::Api::load()?.delete(&kind, &ns, &name)).await.unwrap_or_else(|| Err("The delete stopped.".into()));
+                    out.done("kube-act", r.map(|_| format!("Deleted {what}")));
+                });
+            }
+            Cmd::KubeScale { kind, ns, name, replicas } => {
+                tokio::spawn(async move {
+                    let msg = format!("Scaled {name} to {replicas}");
+                    let r = blocking(move || engine::kube::Api::load()?.scale(&kind, &ns, &name, replicas)).await.unwrap_or_else(|| Err("Scaling stopped.".into()));
+                    out.done("kube-act", r.map(|_| msg));
+                });
+            }
             Cmd::KubeOpen(open) => {
                 self.kube_open = open;
                 if open && config::load().kubernetes {

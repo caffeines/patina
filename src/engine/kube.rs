@@ -338,17 +338,83 @@ impl Api {
     }
 
     fn get(&self, path: &str) -> Result<Value, String> {
-        match self.agent.get(&format!("{}{path}", self.server)).call() {
-            Ok(r) => serde_json::from_str(&r.into_string().map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
-            Err(ureq::Error::Status(code, _)) => Err(format!("The cluster answered {code} for {path}.")),
-            Err(_) => Err(format!("Can't reach the cluster's API on {}.", self.server.trim_start_matches("https://"))),
+        let r = self.agent.get(&format!("{}{path}", self.server)).call().map_err(|e| self.fail(e))?;
+        serde_json::from_str(&r.into_string().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    }
+
+    /// The cluster's own message for a refusal (a Status object), or why it
+    /// couldn't be reached.
+    fn fail(&self, e: ureq::Error) -> String {
+        match e {
+            ureq::Error::Status(code, r) => {
+                let msg = r.into_string().ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["message"].as_str().map(str::to_string));
+                match msg {
+                    Some(m) => {
+                        let mut c = m.chars();
+                        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or(m) + "."
+                    }
+                    None => format!("The cluster refused with {code}."),
+                }
+            }
+            _ => format!("Can't reach the cluster's API on {}.", self.server.trim_start_matches("https://")),
         }
+    }
+
+    /// Delete an object, and what it owns (pods of a deployment, say).
+    pub fn delete(&self, kind: &str, ns: &str, name: &str) -> Result<(), String> {
+        let path = object_path(kind, ns, name).ok_or_else(|| format!("Patina can't delete a {kind}."))?;
+        self.agent.delete(&format!("{}{path}?propagationPolicy=Background", self.server)).call().map_err(|e| self.fail(e))?;
+        Ok(())
+    }
+
+    /// Set how many replicas a deployment or stateful set runs.
+    pub fn scale(&self, kind: &str, ns: &str, name: &str, replicas: u32) -> Result<(), String> {
+        let path = object_path(kind, ns, name).filter(|_| can_scale(kind)).ok_or_else(|| format!("A {kind} can't be scaled."))?;
+        self.agent
+            .request("PATCH", &format!("{}{path}/scale", self.server))
+            .set("Content-Type", "application/merge-patch+json")
+            .send_string(&serde_json::json!({ "spec": { "replicas": replicas } }).to_string())
+            .map_err(|e| self.fail(e))?;
+        Ok(())
     }
 
     fn items(&self, path: &str) -> Result<Vec<Value>, String> {
         Ok(self.get(path)?["items"].as_array().cloned().unwrap_or_default())
     }
 }
+
+/// Where a kind lives in the API: its group's path, plural, and whether
+/// objects belong to a namespace.
+fn resource(kind: &str) -> Option<(&'static str, &'static str, bool)> {
+    Some(match kind {
+        "Pod" => ("/api/v1", "pods", true),
+        "Service" => ("/api/v1", "services", true),
+        "PersistentVolumeClaim" => ("/api/v1", "persistentvolumeclaims", true),
+        "PersistentVolume" => ("/api/v1", "persistentvolumes", false),
+        "ConfigMap" => ("/api/v1", "configmaps", true),
+        "Secret" => ("/api/v1", "secrets", true),
+        "Deployment" => ("/apis/apps/v1", "deployments", true),
+        "StatefulSet" => ("/apis/apps/v1", "statefulsets", true),
+        "DaemonSet" => ("/apis/apps/v1", "daemonsets", true),
+        "Job" => ("/apis/batch/v1", "jobs", true),
+        "CronJob" => ("/apis/batch/v1", "cronjobs", true),
+        "Ingress" => ("/apis/networking.k8s.io/v1", "ingresses", true),
+        _ => return None,
+    })
+}
+
+fn object_path(kind: &str, ns: &str, name: &str) -> Option<String> {
+    let (base, plural, namespaced) = resource(kind)?;
+    Some(if namespaced { format!("{base}/namespaces/{ns}/{plural}/{name}") } else { format!("{base}/{plural}/{name}") })
+}
+
+pub fn can_scale(kind: &str) -> bool {
+    matches!(kind, "Deployment" | "StatefulSet")
+}
+
+/// The kinds the browser lists besides pods, in the order it fetches them.
+const KINDS: [&str; 11] =
+    ["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Service", "Ingress", "PersistentVolumeClaim", "PersistentVolume", "ConfigMap", "Secret"];
 
 /// Everything the browser shows, read from the API in one go.
 pub fn snapshot(api: &Api) -> Result<Snapshot, String> {
@@ -367,20 +433,9 @@ pub fn snapshot(api: &Api) -> Result<Snapshot, String> {
         let key = (s(&p["metadata"]["namespace"]), s(&p["metadata"]["name"]));
         objs.push(pod(&p, usage.get(&key).copied()));
     }
-    for (path, kind) in [
-        ("/apis/apps/v1/deployments", "Deployment"),
-        ("/apis/apps/v1/statefulsets", "StatefulSet"),
-        ("/apis/apps/v1/daemonsets", "DaemonSet"),
-        ("/apis/batch/v1/jobs", "Job"),
-        ("/apis/batch/v1/cronjobs", "CronJob"),
-        ("/api/v1/services", "Service"),
-        ("/apis/networking.k8s.io/v1/ingresses", "Ingress"),
-        ("/api/v1/persistentvolumeclaims", "PersistentVolumeClaim"),
-        ("/api/v1/persistentvolumes", "PersistentVolume"),
-        ("/api/v1/configmaps", "ConfigMap"),
-        ("/api/v1/secrets", "Secret"),
-    ] {
-        objs.extend(api.items(path)?.iter().filter_map(|o| other(kind, o)));
+    for kind in KINDS {
+        let (base, plural, _) = resource(kind).unwrap_or_default();
+        objs.extend(api.items(&format!("{base}/{plural}"))?.iter().filter_map(|o| other(kind, o)));
     }
     let node = api.items("/api/v1/nodes")?.first().map(|n| {
         let name = s(&n["metadata"]["name"]);
@@ -603,6 +658,16 @@ mod tests {
                 p("default/web-5d9", "1/1", "Running", true),
             ]
         );
+    }
+
+    #[test]
+    fn finds_objects_in_the_api() {
+        assert_eq!(object_path("Deployment", "shop", "web").as_deref(), Some("/apis/apps/v1/namespaces/shop/deployments/web"));
+        assert_eq!(object_path("Pod", "kube-system", "coredns-1").as_deref(), Some("/api/v1/namespaces/kube-system/pods/coredns-1"));
+        assert_eq!(object_path("PersistentVolume", "", "pvc-1").as_deref(), Some("/api/v1/persistentvolumes/pvc-1"));
+        assert_eq!(object_path("Node", "", "patina"), None);
+        assert!(KINDS.iter().all(|k| resource(k).is_some()));
+        assert!(can_scale("StatefulSet") && !can_scale("DaemonSet"));
     }
 
     #[test]

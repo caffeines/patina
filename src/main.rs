@@ -35,6 +35,7 @@ OPTIONS:
                         the window ignores all input while it waits
     --popover           show the menu bar popover in a window of its own (for screenshots)
     --write-icon <png>  write the 1024px app icon and quit
+    -V, --version       print the version
     -h, --help          print this help
 
 VIEW OPTIONS:
@@ -74,6 +75,10 @@ fn parse_args() -> Args {
                         std::process::exit(1);
                     }
                 }
+            }
+            "-V" | "--version" => {
+                println!("patina {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
             "-h" | "--help" => {
                 print!("{HELP}");

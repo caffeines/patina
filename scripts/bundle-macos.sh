@@ -5,10 +5,16 @@
 #   DEVELOPER_ID  signing identity, e.g. "Developer ID Application: Name (TEAMID)".
 #                 Unset: ad-hoc signature (fine on this Mac, not for distribution).
 #   BUNDLE_ID     bundle identifier (default: local.patina.desktop).
+#   PATINA_BIN    an already built patina binary to package (the Homebrew
+#                 formula uses this). Unset: cargo build --release.
 set -eu
 cd "$(dirname "$0")/.."
 
-cargo build --release
+BIN="${PATINA_BIN:-}"
+if [ -z "$BIN" ]; then
+  cargo build --release
+  BIN=target/release/patina
+fi
 
 APP=target/Patina.app
 ICONSET=target/Patina.iconset
@@ -18,9 +24,9 @@ IDENTITY="${DEVELOPER_ID:--}"
 
 rm -rf "$APP" "$ICONSET"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ICONSET"
-cp target/release/patina "$APP/Contents/MacOS/Patina"
+cp "$BIN" "$APP/Contents/MacOS/Patina"
 
-target/release/patina --write-icon target/icon-1024.png
+"$BIN" --write-icon target/icon-1024.png
 for s in 16 32 128 256 512; do
   sips -z "$s" "$s" target/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
   d=$((s * 2))

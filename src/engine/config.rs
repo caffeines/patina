@@ -70,6 +70,7 @@ fn set_login_item(on: bool) {
             return;
         }
         let Ok(exe) = std::env::current_exe() else { return };
+        let exe = stable_exe(&exe);
         let _ = std::fs::create_dir_all(&dir);
         let body = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -90,7 +91,42 @@ fn set_login_item(on: bool) {
     let _ = on;
 }
 
+/// Homebrew installs into a versioned Cellar folder that an upgrade removes.
+/// Point at its `opt` link instead, which always leads to the current version:
+/// `/opt/homebrew/Cellar/patina/0.1.0/bin/patina` becomes `/opt/homebrew/opt/patina/bin/patina`.
+#[cfg(any(target_os = "macos", test))]
+fn stable_exe(path: &std::path::Path) -> std::path::PathBuf {
+    let parts: Vec<_> = path.components().collect();
+    match parts.iter().position(|c| c.as_os_str() == "Cellar") {
+        Some(i) if parts.len() > i + 3 => {
+            let mut out: std::path::PathBuf = parts[..i].iter().collect();
+            out.push("opt");
+            out.push(parts[i + 1]);
+            out.extend(&parts[i + 3..]);
+            out
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::stable_exe;
+
+    #[test]
+    fn homebrew_paths_survive_upgrades() {
+        let app = Path::new("/opt/homebrew/Cellar/patina/0.1.0/Patina.app/Contents/MacOS/Patina");
+        assert_eq!(stable_exe(app), Path::new("/opt/homebrew/opt/patina/Patina.app/Contents/MacOS/Patina"));
+        let bin = Path::new("/usr/local/Cellar/patina/0.2.0_1/bin/patina");
+        assert_eq!(stable_exe(bin), Path::new("/usr/local/opt/patina/bin/patina"));
+        let dev = Path::new("/Users/me/patina/target/release/patina");
+        assert_eq!(stable_exe(dev), dev);
+    }
 }

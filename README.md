@@ -72,6 +72,32 @@ To build a double-clickable app into `target/Patina.app`, and to run the tests:
 cargo test
 ```
 
+## Install with Homebrew
+
+`Formula/patina.rb` builds Patina from source on the Mac it's installed on. That needs no Apple
+Developer ID or notarization: Gatekeeper checks apps downloaded from the internet, and this one is
+compiled locally. The first install takes a few minutes while Rust compiles.
+
+```sh
+brew tap caffeines/patina https://github.com/caffeines/patina
+brew install caffeines/patina/patina           # the latest release
+brew install --HEAD caffeines/patina/patina    # the main branch, before any release is tagged
+```
+
+It installs the `patina` command and `Patina.app` (in `$(brew --prefix)/opt/patina`); `brew info
+patina` shows how to add the app to Applications. Homebrew needs current Command Line Tools to
+build from source; it says so if they're out of date.
+
+To release a version: set `version` in `Cargo.toml` and the same tag in `Formula/patina.rb`,
+commit, then tag and push both together, so the formula never points at a missing tag:
+
+```sh
+git tag v0.2.0
+git push --atomic origin main v0.2.0
+```
+
+Then `brew upgrade patina` picks it up.
+
 ## Release a DMG
 
 `./scripts/release-macos.sh` builds `target/dist/Patina-<version>-arm64.dmg`. Without the

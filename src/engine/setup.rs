@@ -139,8 +139,9 @@ fn latest_docker(index: &str) -> Option<String> {
     best.map(|(_, v)| v)
 }
 
-/// Install `docker` and `docker-compose` into `~/.patina/bin`, and add a
-/// `patina` docker context (without switching to it).
+/// Install `docker` and `docker-compose` into `~/.patina/bin`, add the
+/// `patina` docker context, and put `~/.patina/bin` on PATH (if enabled).
+/// The context becomes current when the engine starts.
 pub fn install_cli(report: Report) -> Result<(), String> {
     paths::ensure();
     if !paths::docker_cli().exists() {
@@ -164,11 +165,10 @@ pub fn install_cli(report: Report) -> Result<(), String> {
         make_executable(&paths::compose_cli());
     }
     report(1.0, "done");
-    let docker = paths::docker_cli();
-    let has_context = Command::new(&docker).args(["context", "inspect", "patina"]).output().is_ok_and(|o| o.status.success());
-    if !has_context {
-        let host = format!("host=unix://{}", paths::docker_sock().display());
-        let _ = Command::new(&docker).args(["context", "create", "patina", "--description", "Patina", "--docker", &host]).output();
+    super::integrate::ensure_context()?;
+    let cfg = config::load();
+    if cfg.shell_path {
+        super::integrate::install_shell()?;
     }
     Ok(())
 }

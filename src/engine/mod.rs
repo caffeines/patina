@@ -16,6 +16,7 @@
 pub mod config;
 pub mod control;
 pub mod guest;
+pub mod integrate;
 pub mod paths;
 pub mod setup;
 

@@ -2646,7 +2646,7 @@ impl State {
                         }
                     }
                     _ => {
-                        if !ok {
+                        if !ok || !msg.is_empty() {
                             self.toast_say(msg, "", None);
                         }
                     }

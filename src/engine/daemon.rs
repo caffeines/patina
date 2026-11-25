@@ -235,6 +235,13 @@ async fn monitor(sh: Arc<Shared>) {
                 if d.ping().await.is_ok() {
                     sh.status.lock().unwrap().first_boot = false;
                     sh.set("running", "Running");
+                    if config::load().set_context {
+                        match tokio::task::spawn_blocking(super::integrate::use_context).await {
+                            Ok(Ok(())) => log("the docker command now uses the patina context"),
+                            Ok(Err(e)) => log(&format!("couldn't switch the docker context: {e}")),
+                            Err(_) => {}
+                        }
+                    }
                 }
             }
         }

@@ -85,6 +85,16 @@ fn live_rows(s: &State) -> Vec<RowDef> {
         Pane::General => vec![
             row("Open at login", "Start Patina when you sign in to this Mac.", Ctl::Cfg("login", false)),
             row("Start the engine on launch", "When off, start it from the engine card.", Ctl::Cfg("autostart", false)),
+            row(
+                "Make Patina the docker default",
+                "The docker command uses Patina's engine (the patina context) each time the engine starts.",
+                Ctl::Cfg("set_context", false),
+            ),
+            row(
+                "Add Patina's tools to PATH",
+                "Puts ~/.patina/bin first in new terminals, through one line in your shell profile.",
+                Ctl::Cfg("shell_path", false),
+            ),
         ],
         Pane::Resources => {
             let cores = host_cpus().max(s.saved.0).max(1);

@@ -28,7 +28,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc as tmpsc;
 use tokio::task::JoinHandle;
 
-use crate::engine::{self, config, control, paths};
+use crate::engine::{self, config, control, integrate, paths};
 use crate::sim::{Asset, Net, St};
 
 // ------------------------------------------------------------------ protocol
@@ -435,6 +435,13 @@ async fn worker(mut rx: tmpsc::UnboundedReceiver<Cmd>, out: Out) {
         df_busy: Arc::new(AtomicBool::new(false)),
         last_down: None,
     };
+    // Existing installs from before PATH integration get it now (if enabled).
+    let _ = blocking(|| {
+        if engine::setup::installed() && config::load().shell_path && !integrate::shell_installed() {
+            let _ = integrate::install_shell();
+        }
+    })
+    .await;
     w.refresh(true).await;
     let mut iv = tokio::time::interval(Duration::from_millis(1000));
     iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -539,6 +546,8 @@ impl W {
         map.insert("rosetta".to_string(), c.rosetta.to_string());
         map.insert("autostart".to_string(), c.autostart.to_string());
         map.insert("login".to_string(), c.login.to_string());
+        map.insert("set_context".to_string(), c.set_context.to_string());
+        map.insert("shell_path".to_string(), c.shell_path.to_string());
         self.out.send(Ev::Config(map));
     }
 
@@ -925,11 +934,24 @@ impl W {
                     "rosetta" => c.rosetta = on,
                     "autostart" => c.autostart = on,
                     "login" => c.login = on,
+                    "set_context" => c.set_context = on,
+                    "shell_path" => c.shell_path = on,
                     _ => {}
                 }
-                let r = config::save(&c).map(|_| String::new());
+                let saved = config::save(&c);
+                let key = k.clone();
+                // The docker context and shell profiles change right away.
+                let applied = blocking(move || match key.as_str() {
+                    "set_context" if on => integrate::use_context().map(|_| "The docker command now uses Patina".to_string()),
+                    "set_context" => integrate::release_context().map(|_| "The docker command uses the default context again".to_string()),
+                    "shell_path" if on => integrate::install_shell().map(|_| "Open a new terminal to use Patina's docker".to_string()),
+                    "shell_path" => integrate::remove_shell().map(|_| "Removed Patina from your shell profile".to_string()),
+                    _ => Ok(String::new()),
+                })
+                .await
+                .unwrap_or_else(|| Ok(String::new()));
                 self.send_config();
-                out.done(format!("cfg:{k}"), r);
+                out.done(format!("cfg:{k}"), saved.and(applied));
             }
             Cmd::OpenTerminal(id) => {
                 if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {

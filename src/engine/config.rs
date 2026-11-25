@@ -16,12 +16,16 @@ pub struct EngineConfig {
     pub autostart: bool,
     /// Open Patina when you sign in.
     pub login: bool,
+    /// Make `patina` the current docker context when the engine starts.
+    pub set_context: bool,
+    /// Put `~/.patina/bin` first on PATH through the shell profile.
+    pub shell_path: bool,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         let host = host_cpus();
-        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false }
+        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true }
     }
 }
 

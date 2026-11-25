@@ -28,6 +28,10 @@ small Linux VM that Patina boots itself with Apple's Virtualization framework.
   `~/.patina/bin` and adds a `patina` docker context, without switching your current one.
 - **First boot** installs Docker Engine in the guest with cloud-init (about 2–3 minutes).
   Later boots take about 4 seconds; shutting down takes about 2.
+- **The docker command uses Patina.** When the engine finishes starting, Patina makes `patina`
+  the current docker context. It also adds one marked line to `~/.zprofile` (and
+  `~/.bash_profile`, if you have one) that puts `~/.patina/bin` first on PATH in new terminals.
+  Both are switches in Settings › General; turning them off undoes them.
 - **The helper** (`patina engine run`) owns the VM. It keeps running after the app quits, like a
   system service. To get the virtualization entitlement, the app keeps an ad-hoc-signed copy of
   itself in `~/.patina/bin/patina-engine`.
@@ -45,11 +49,9 @@ cargo run --release
 The first launch walks through setup. After that, the app opens to the main window and starts the
 engine. You can turn that off in Settings › General.
 
-To use the engine from a terminal:
+In a new terminal, `docker` is Patina's and talks to Patina's engine:
 
 ```sh
-export PATH="$HOME/.patina/bin:$PATH"
-docker context use patina        # or: DOCKER_HOST=unix://$HOME/.patina/run/docker.sock
 docker run --rm hello-world
 ```
 
@@ -80,7 +82,7 @@ cargo test
   progress, prune, create and delete. Deleting something still in use is blocked.
 - **Engine card:** boot progress and memory use, plus Start, Stop and Restart.
 - **Settings:** CPU and memory limits (applied with a restart), Rosetta, open at login, start
-  on launch.
+  on launch, making Patina the docker default, and adding its tools to PATH.
 - **Command palette:** `⌘K`.
 
 **Not built yet:** Linux machines and Kubernetes. Those views say so. The menu bar popover from

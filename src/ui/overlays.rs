@@ -354,18 +354,20 @@ fn palette(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: boo
 fn toast(ctx: &Context, cx: &mut Cx) {
     let Some(t) = &cx.s.toast else { return };
     let (msg, act, at) = (t.msg.clone(), t.act.clone(), t.at);
-    let screen = ctx.screen_rect();
     let el = (cx.now - at) as f32;
     let e = Ease::POP.at((el / 0.35).min(1.0));
     if el < 0.4 {
         cx.tw.busy = true;
     }
-    Area::new(Id::new("toast")).order(Order::Tooltip).fixed_pos(screen.min).constrain(false).interactable(true).show(ctx, |ui| {
+    // Anchored so the area (and its click-swallowing rect) is just the toast card.
+    // Pinning it at the screen corner made it cover everything up to the toast.
+    let slide = vec2(0.0, -22.0 + 18.0 * (1.0 - e));
+    Area::new(Id::new("toast")).order(Order::Tooltip).anchor(Align2::CENTER_BOTTOM, slide).constrain(false).interactable(true).show(ctx, |ui| {
         let mg = w::g(ui, &msg, sans(13.5), TEXT);
         let btn = (!act.is_empty()).then(|| Btn::plain(act.clone()).h(28.0).pad(10.0).radius(7.0).font(semibold(13.5)).color(COPPER));
         let bw = btn.as_ref().map_or(0.0, |b| b.width(ui) + 12.0);
         let wd = 16.0 + mg.size().x + 8.0 + bw + 8.0;
-        let rect = Rect::from_min_size(pos2(screen.center().x - wd / 2.0, screen.bottom() - 22.0 - 42.0 + 18.0 * (1.0 - e)), vec2(wd, 42.0));
+        let rect = Rect::from_min_size(ui.max_rect().min, vec2(wd, 42.0));
         let mut tui = ui.new_child(UiBuilder::new().max_rect(rect));
         tui.multiply_opacity(e.clamp(0.0, 1.0));
         let p = tui.painter().clone();

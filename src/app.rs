@@ -3,14 +3,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use egui::{Id, Key, Modifiers, ViewportCommand};
+use egui::{Frame, Id, Key, Modifiers, ViewportBuilder, ViewportCommand, ViewportId};
 
 use crate::live;
+use crate::menubar::{self, Anchor, POPOVER_SIZE, POPOVER_TITLE};
 use crate::onboarding::{self, Onb};
-use crate::sim::{Ov, Preset, State};
+use crate::sim::{Engine, Ov, Preset, State};
 use crate::theme;
 use crate::tween::Tweens;
-use crate::ui::{self, Cx};
+use crate::ui::{self, popover, Cx};
 
 #[derive(Clone, Debug, Default)]
 pub struct Args {
@@ -21,6 +22,18 @@ pub struct Args {
     pub wait: f64,
     /// Use the simulated engine instead of real Docker.
     pub demo: bool,
+    /// Draw the menu bar popover in the main window (for screenshots).
+    pub popover: bool,
+}
+
+/// The open menu bar popover.
+struct Pop {
+    anchor: Anchor,
+    opened: f64,
+    /// Frames drawn so far (native styling happens on the first few).
+    frames: u32,
+    /// It has had keyboard focus; losing it closes the popover.
+    focused: bool,
 }
 
 struct Shot {
@@ -37,6 +50,19 @@ pub struct App {
     preset: Preset,
     shot: Option<Shot>,
     demo: bool,
+    /// Draw only the popover, in the main window (`--popover`).
+    popover_only: bool,
+    /// The status item is in the menu bar.
+    tray: bool,
+    pop: Option<Pop>,
+    /// When the popover last closed because it lost focus.
+    pop_blurred: f64,
+    /// The main window is closed; Patina lives in the menu bar.
+    hidden: bool,
+    /// Quit was chosen: let the next close request through.
+    quitting: bool,
+    /// The menu bar setting before the engine reports its config.
+    menubar_default: bool,
 }
 
 pub const MAIN_SIZE: [f32; 2] = [1360.0, 860.0];
@@ -62,6 +88,151 @@ impl App {
             started: now,
             preset: args.preset.clone(),
             shot: args.screenshot.map(|path| Shot { path, at: now + args.wait, sent: false }),
+            popover_only: args.popover,
+            tray: false,
+            pop: None,
+            pop_blurred: f64::NEG_INFINITY,
+            hidden: false,
+            quitting: false,
+            menubar_default: args.demo || crate::engine::config::load().menubar,
+        }
+    }
+
+    fn menubar_wanted(&self) -> bool {
+        if self.shot.is_some() || self.popover_only {
+            return false;
+        }
+        if self.s.is_live() {
+            self.s.cfg.get("menubar").map_or(self.menubar_default, |v| v == "true")
+        } else {
+            self.s.set.menubar
+        }
+    }
+
+    /// Bring the main window back (from the menu bar, or to the front).
+    fn show_main(&mut self, ctx: &egui::Context, now: f64) {
+        self.pop = None;
+        menubar::set_dock(true);
+        if self.hidden {
+            self.hidden = false;
+            self.started = now;
+            self.s.view_at = now;
+        }
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+        menubar::activate();
+        ctx.request_repaint();
+    }
+
+    fn close_pop(&mut self, blurred: bool, now: f64) {
+        self.pop = None;
+        if blurred {
+            self.pop_blurred = now;
+        } else if self.hidden {
+            // Nothing of Patina's is on screen: hand the keyboard back.
+            menubar::hide_app();
+        }
+    }
+
+    /// The status item, its popover, and closing the window to the menu bar.
+    fn menu_bar(&mut self, ctx: &egui::Context, now: f64) {
+        let want = self.menubar_wanted();
+        if want != self.tray {
+            if want {
+                self.tray = menubar::install(ctx);
+            } else {
+                menubar::remove();
+                self.tray = false;
+                self.pop = None;
+                if self.hidden {
+                    self.show_main(ctx, now);
+                }
+            }
+        }
+        if !self.tray {
+            return;
+        }
+        menubar::set_running(matches!(self.s.engine, Engine::Running | Engine::Ready));
+
+        for ev in menubar::take_events() {
+            match ev {
+                menubar::Event::Toggle(anchor) => {
+                    if self.pop.is_some() {
+                        self.close_pop(false, now);
+                    } else if now - self.pop_blurred > 0.35 {
+                        // A click on the status item can arrive just after the
+                        // popover closed for losing focus; don't reopen it then.
+                        menubar::activate();
+                        self.pop = Some(Pop { anchor, opened: now, frames: 0, focused: false });
+                    }
+                }
+                menubar::Event::Open => self.show_main(ctx, now),
+                menubar::Event::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+                }
+                menubar::Event::Activated => {
+                    // Opened again (Finder, Spotlight) while living in the menu bar.
+                    if self.hidden && self.pop.is_none() {
+                        self.show_main(ctx, now);
+                    }
+                }
+            }
+        }
+
+        // Closing the window keeps Patina running in the menu bar.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.hidden = true;
+            menubar::set_dock(false);
+        }
+
+        let Some(pop) = &mut self.pop else { return };
+        let t0 = pop.opened;
+        let builder = ViewportBuilder::default()
+            .with_title(POPOVER_TITLE)
+            .with_inner_size(POPOVER_SIZE)
+            .with_position(pop.anchor.pos)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(false)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_active(true);
+        let (out, fx, ambient, focused, esc) = ctx.show_viewport_immediate(ViewportId::from_hash_of("patina-popover"), builder, |ctx, _| {
+            let mut cx = Cx { s: &mut self.s, tw: &mut self.tw, fx: Vec::new(), now, started: t0, ambient: false };
+            let out = egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| popover::show(ui, &mut cx, t0)).inner;
+            let focused = ctx.input(|i| i.focused);
+            let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            (out, cx.fx, cx.ambient, focused, esc)
+        });
+        if pop.frames < 3 {
+            menubar::style_popover((pop.frames == 0).then_some(pop.anchor));
+            pop.frames += 1;
+            ctx.request_repaint();
+        }
+        let blurred = if focused {
+            pop.focused = true;
+            false
+        } else {
+            pop.focused
+        };
+        let acted = !fx.is_empty();
+        for f in fx {
+            f(&mut self.s);
+        }
+        if out.open || self.s.want_setup {
+            self.show_main(ctx, now);
+        } else if out.close || esc {
+            self.close_pop(false, now);
+        } else if blurred {
+            self.close_pop(true, now);
+        }
+        if acted {
+            ctx.request_repaint();
+        } else if ambient {
+            ctx.request_repaint_after(Duration::from_millis(33));
         }
     }
 
@@ -129,6 +300,41 @@ impl eframe::App for App {
         self.tw.begin_frame(now);
         self.handle_shot(ctx, now);
 
+        if self.popover_only {
+            self.s.tick(now);
+            let mut cx = Cx { s: &mut self.s, tw: &mut self.tw, fx: Vec::new(), now, started: self.started, ambient: false };
+            let t0 = self.started;
+            egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| popover::show(ui, &mut cx, t0));
+            let fx = std::mem::take(&mut cx.fx);
+            let ambient = cx.ambient;
+            let acted = !fx.is_empty();
+            for f in fx {
+                f(&mut self.s);
+            }
+            if acted || self.tw.busy {
+                ctx.request_repaint();
+            } else if ambient {
+                ctx.request_repaint_after(Duration::from_millis(33));
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64((self.s.next_due() - now).clamp(0.0, 5.0)));
+            }
+            return;
+        }
+
+        if self.onb.is_none() || self.pop.is_some() {
+            self.s.tick(now);
+        }
+        self.menu_bar(ctx, now);
+        if self.hidden {
+            // The window is closed to the menu bar: keep the state moving, draw nothing.
+            if self.tw.busy {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_secs_f64((self.s.next_due() - now).clamp(0.0, 5.0)));
+            }
+            return;
+        }
+
         if let Some(onb) = &mut self.onb {
             onb.tick(now);
             let ambient = onboarding::show(ctx, onb, &mut self.tw);
@@ -147,7 +353,6 @@ impl eframe::App for App {
             return;
         }
 
-        self.s.tick(now);
         if self.s.want_setup && !self.demo {
             self.s.want_setup = false;
             self.onb = Some(Onb::new(now, 2, true, Some(ctx.clone())));

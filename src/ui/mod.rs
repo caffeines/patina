@@ -6,6 +6,7 @@ pub mod kube;
 pub mod machines;
 pub mod main_view;
 pub mod overlays;
+pub mod popover;
 pub mod settings;
 pub mod side;
 

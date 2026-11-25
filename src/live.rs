@@ -548,6 +548,7 @@ impl W {
         map.insert("login".to_string(), c.login.to_string());
         map.insert("set_context".to_string(), c.set_context.to_string());
         map.insert("shell_path".to_string(), c.shell_path.to_string());
+        map.insert("menubar".to_string(), c.menubar.to_string());
         self.out.send(Ev::Config(map));
     }
 
@@ -936,6 +937,7 @@ impl W {
                     "login" => c.login = on,
                     "set_context" => c.set_context = on,
                     "shell_path" => c.shell_path = on,
+                    "menubar" => c.menubar = on,
                     _ => {}
                 }
                 let saved = config::save(&c);

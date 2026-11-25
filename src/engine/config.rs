@@ -20,12 +20,14 @@ pub struct EngineConfig {
     pub set_context: bool,
     /// Put `~/.patina/bin` first on PATH through the shell profile.
     pub shell_path: bool,
+    /// Keep the status item in the menu bar; closing the window keeps Patina there.
+    pub menubar: bool,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         let host = host_cpus();
-        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true }
+        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true }
     }
 }
 

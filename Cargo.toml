@@ -16,6 +16,25 @@ egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
 futures-util = "0.3.34"
 libc = "0.2.191"
 objc2 = { version = "0.6.5", features = ["catch-all"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "NSWindow",
+] }
 objc2-foundation = "0.3.2"
 objc2-virtualization = "0.3.2"
 png = "0.17"

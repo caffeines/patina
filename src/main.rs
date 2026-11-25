@@ -9,6 +9,7 @@ mod app;
 mod engine;
 mod icons;
 mod live;
+mod menubar;
 mod onboarding;
 mod sim;
 mod theme;
@@ -32,6 +33,7 @@ OPTIONS:
     --step <1-4>        start the first-run flow on this step
     --screenshot <png>  save a screenshot of the window and quit (with --wait <seconds>);
                         the window ignores all input while it waits
+    --popover           show the menu bar popover in a window of its own (for screenshots)
     --write-icon <png>  write the 1024px app icon and quit
     -h, --help          print this help
 
@@ -58,6 +60,7 @@ fn parse_args() -> Args {
             "--show" => a.preset.show = val(),
             "--phase" => a.preset.phase = val(),
             "--onboarding" => a.onboarding = true,
+            "--popover" => a.popover = true,
             "--step" => a.step = val().parse().unwrap_or(1),
             "--screenshot" => a.screenshot = Some(val().into()),
             "--wait" => a.wait = val().parse().unwrap_or(1.5),
@@ -177,8 +180,10 @@ fn main() -> eframe::Result {
     }
     let args = parse_args();
     let first_run = if args.demo { !app::is_onboarded() } else { !engine::setup::installed() };
-    let show_onboarding = args.onboarding || (args.screenshot.is_none() && first_run && args.preset.show.is_empty());
-    let (size, min, resizable) = if show_onboarding {
+    let show_onboarding = !args.popover && (args.onboarding || (args.screenshot.is_none() && first_run && args.preset.show.is_empty()));
+    let (size, min, resizable) = if args.popover {
+        (menubar::POPOVER_SIZE, menubar::POPOVER_SIZE, false)
+    } else if show_onboarding {
         (app::ONB_SIZE, app::ONB_SIZE, false)
     } else {
         (app::MAIN_SIZE, app::MAIN_MIN, true)
@@ -192,6 +197,8 @@ fn main() -> eframe::Result {
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)
+        // The popover window has rounded corners, so the GL surface needs alpha.
+        .with_transparent(true)
         .with_icon(Arc::new(app::app_icon(256)));
     let options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
     eframe::run_native("Patina", options, Box::new(move |cc| Ok(Box::new(App::new(cc, args, show_onboarding)))))

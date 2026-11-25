@@ -1384,6 +1384,18 @@ impl State {
         }
     }
 
+    /// Stop every running container (the popover's Stop all).
+    pub fn stop_all(&mut self) {
+        if self.engine != Engine::Running {
+            return;
+        }
+        let ids: Vec<String> =
+            self.alive().filter(|c| matches!(c.st, St::Running | St::Paused) || c.loops > 0).map(|c| c.id.clone()).collect();
+        for (i, id) in ids.into_iter().enumerate() {
+            self.after(90 * i as u64, move |s| s.toggle(&id));
+        }
+    }
+
     // --------------------------------------------------------------- engine
 
     pub fn reboot(&mut self) {

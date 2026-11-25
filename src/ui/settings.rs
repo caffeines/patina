@@ -84,6 +84,11 @@ fn live_rows(s: &State) -> Vec<RowDef> {
     match s.pane {
         Pane::General => vec![
             row("Open at login", "Start Patina when you sign in to this Mac.", Ctl::Cfg("login", false)),
+            row(
+                "Show in the menu bar",
+                "Quick controls in the menu bar. Closing the window keeps Patina running there.",
+                Ctl::Cfg("menubar", false),
+            ),
             row("Start the engine on launch", "When off, start it from the engine card.", Ctl::Cfg("autostart", false)),
             row(
                 "Make Patina the docker default",

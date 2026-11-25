@@ -4,7 +4,7 @@ use egui::{pos2, vec2, Align2, Context, CursorIcon, Frame, Id, Rect, Sense, Stro
 
 use super::{enter, Cx};
 use crate::icons::{self, Ink};
-use crate::sim::{Engine, View};
+use crate::sim::{Engine, State, View};
 use crate::theme::*;
 use crate::tween::Ease;
 use crate::widgets::{self as w, Btn};
@@ -138,41 +138,7 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     } else {
         (s.saved.0, s.saved.1 as f64, "arm64".to_string())
     };
-    let title = if connecting {
-        "Connecting to Docker".to_string()
-    } else if boot && is_live {
-        match s.engine_state.as_str() {
-            "installing" => "Installing Docker".to_string(),
-            "booting" => "Booting Linux".to_string(),
-            _ => "Starting the VM".to_string(),
-        }
-    } else if boot {
-        ["Booting kernel", "Starting agent", "Starting Docker Engine"][s.boot.min(2)].to_string()
-    } else {
-        match eng {
-            Engine::Ready => format!("Ready in {:.1} s", s.ready_secs),
-            Engine::Off if is_live && s.engine_op.is_some() => "Stopping the engine".into(),
-            Engine::Off => "Engine stopped".into(),
-            Engine::Failed => "Engine failed".into(),
-            _ => "Engine running".into(),
-        }
-    };
-    let sub = if connecting {
-        "Looking for the engine".to_string()
-    } else if boot && is_live && s.engine_state == "installing" {
-        "First start takes a few minutes".to_string()
-    } else if boot {
-        "Starting".to_string()
-    } else {
-        match eng {
-            Engine::Ready => "Resuming containers".into(),
-            Engine::Off if is_live && s.engine_op.is_some() => "Containers are shutting down".into(),
-            Engine::Off => "Nothing is running".into(),
-            Engine::Failed if is_live => "See the log for details".into(),
-            Engine::Failed => "Could not start the VM".into(),
-            _ => format!("{} CPU · {} GB · {}", cpus, fmt_gb(mem_gb), arch),
-        }
-    };
+    let (title, sub) = engine_text(s, format!("{} CPU · {} GB · {}", cpus, fmt_gb(mem_gb), arch));
     w::text(&p, ui, x + 32.0, y + 9.5, &title, medium(13.5), TEXT);
     w::text(&p, ui, x + 32.0, y + 27.5, &sub, sans(12.0), MUTED);
     y += 36.0 + 14.0;
@@ -209,7 +175,52 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     }
 }
 
-fn fmt_gb(gb: f64) -> String {
+/// The engine's title and one-line status, shared by the engine card and the
+/// menu bar popover. `running` is the status line while the engine is up.
+pub fn engine_text(s: &State, running: String) -> (String, String) {
+    let eng = s.engine;
+    let boot = eng == Engine::Booting;
+    let is_live = s.is_live();
+    let connecting = is_live && boot && s.engine_op.is_none() && s.engine_state.is_empty();
+    let title = if connecting {
+        "Connecting to Docker".to_string()
+    } else if boot && is_live {
+        match s.engine_state.as_str() {
+            "installing" => "Installing Docker".to_string(),
+            "booting" => "Booting Linux".to_string(),
+            _ => "Starting the VM".to_string(),
+        }
+    } else if boot {
+        ["Booting kernel", "Starting agent", "Starting Docker Engine"][s.boot.min(2)].to_string()
+    } else {
+        match eng {
+            Engine::Ready => format!("Ready in {:.1} s", s.ready_secs),
+            Engine::Off if is_live && s.engine_op.is_some() => "Stopping the engine".into(),
+            Engine::Off => "Engine stopped".into(),
+            Engine::Failed => "Engine failed".into(),
+            _ => "Engine running".into(),
+        }
+    };
+    let sub = if connecting {
+        "Looking for the engine".to_string()
+    } else if boot && is_live && s.engine_state == "installing" {
+        "First start takes a few minutes".to_string()
+    } else if boot {
+        "Starting".to_string()
+    } else {
+        match eng {
+            Engine::Ready => "Resuming containers".into(),
+            Engine::Off if is_live && s.engine_op.is_some() => "Containers are shutting down".into(),
+            Engine::Off => "Nothing is running".into(),
+            Engine::Failed if is_live => "See the log for details".into(),
+            Engine::Failed => "Could not start the VM".into(),
+            _ => running,
+        }
+    };
+    (title, sub)
+}
+
+pub fn fmt_gb(gb: f64) -> String {
     if (gb - gb.round()).abs() < 0.05 {
         format!("{}", gb.round() as i64)
     } else {

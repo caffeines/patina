@@ -116,9 +116,13 @@ later.
 - **Settings:** CPU and memory limits (applied with a restart), Rosetta, open at login, start
   on launch, making Patina the docker default, and adding its tools to PATH.
 - **Command palette:** `⌘K`.
+- **Menu bar:** Patina's mark sits in the menu bar, dimmed while the engine is off. Click it for
+  the popover from the design: the engine switch and status, each container with start/stop and
+  CPU bars, Open Patina, and Stop all. Right-click for Open Patina and Quit Patina. Closing the
+  window keeps Patina running in the menu bar without a Dock icon; opening Patina again brings
+  the window back. Settings › General turns it off, and then closing the window quits.
 
-**Not built yet:** Linux machines and Kubernetes. Those views say so. The menu bar popover from
-the design isn't built either.
+**Not built yet:** Linux machines and Kubernetes. Those views say so.
 
 `--demo` runs the simulated engine from the design instead, with nothing touching Docker:
 
@@ -126,6 +130,7 @@ the design isn't built either.
 cargo run -- --demo
 cargo run -- --scenario trouble            # containers needing attention (simulated)
 cargo run -- --show run --phase conflict   # run dialog, port in use (simulated)
+cargo run -- --popover --scenario failed  # the menu bar popover in a window (simulated)
 cargo run -- --help                        # every option
 ```
 
@@ -141,6 +146,7 @@ cargo run -- --help                        # every option
 | `src/live.rs` | The app's Docker API client (bollard): polling, stats and log streams, actions |
 | `src/sim.rs` | App state and every action; the simulated engine for `--demo` |
 | `src/ui/`, `src/onboarding.rs` | The views and the first-run flow |
+| `src/menubar.rs` | The status item (AppKit through objc2), its right-click menu, the Dock icon |
 | `src/widgets.rs`, `src/tween.rs`, `src/icons.rs`, `src/theme.rs` | Drawing, animation, icons, colors and fonts |
 
 Set `PATINA_DEBUG=1` to print Docker API errors. The guest's boot log is in

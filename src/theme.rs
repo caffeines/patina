@@ -66,6 +66,8 @@ pub const BAR_PAUSED: Color32 = hex(0x3F6E64);
 pub const BAR_WARM: Color32 = hex(0x7A5538);
 pub const BAR_IDLE: Color32 = hex(0x34302D);
 pub const ASSET_TRACK: Color32 = hex(0x211F1D);
+pub const POP_EDGE: Color32 = hex(0x2A2724);
+pub const POP_ROW_HOVER: Color32 = hex(0x191715);
 
 pub fn sans(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)

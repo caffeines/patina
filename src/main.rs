@@ -4,6 +4,7 @@
 //! The engine is simulated; see `sim.rs`.
 
 mod app;
+mod engine;
 mod icons;
 mod onboarding;
 mod sim;
@@ -74,7 +75,92 @@ fn parse_args() -> Args {
     a
 }
 
+fn engine_cli(args: &[String]) -> i32 {
+    use engine::{control, setup};
+    let report = |f: f64, note: &str| {
+        if f >= 0.0 {
+            eprint!("\r  {:>3.0}%  {note:<40}", f * 100.0);
+        } else {
+            eprint!("\r        {note:<40}");
+        }
+    };
+    match args.first().map(String::as_str) {
+        #[cfg(target_os = "macos")]
+        Some("run") => engine::daemon::run(),
+        Some("setup") => {
+            eprintln!("Installing the docker and compose commands");
+            if let Err(e) = setup::install_cli(&report) {
+                eprintln!("\n{e}");
+                return 1;
+            }
+            eprintln!("\nCreating the disk image");
+            if let Err(e) = setup::create_disk(&report) {
+                eprintln!("\n{e}");
+                return 1;
+            }
+            eprintln!("\nDone.");
+            0
+        }
+        Some("start") => match control::start() {
+            Ok(()) => {
+                eprintln!("Starting. Follow along with `patina engine status`.");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Some("stop") => {
+            if !control::stop() {
+                eprintln!("The engine isn't running.");
+                return 0;
+            }
+            for _ in 0..80 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if control::status().is_none() {
+                    eprintln!("Stopped.");
+                    return 0;
+                }
+            }
+            eprintln!("The engine is still shutting down.");
+            1
+        }
+        Some("status") => match control::status() {
+            Some(s) => {
+                println!("{}: {} ({:.0} s)", s.state, s.message, s.uptime);
+                0
+            }
+            None => {
+                println!("stopped{}", if setup::installed() { "" } else { " (not set up)" });
+                3
+            }
+        },
+        Some("reset") => {
+            if control::status().is_some() {
+                eprintln!("Stop the engine first.");
+                return 1;
+            }
+            match setup::reset() {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: patina engine <setup|start|stop|status|reset|run>");
+            2
+        }
+    }
+}
+
 fn main() -> eframe::Result {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("engine") {
+        std::process::exit(engine_cli(&argv[2..]));
+    }
     let args = parse_args();
     let show_onboarding = args.onboarding || (args.screenshot.is_none() && !app::is_onboarded() && args.preset.show.is_empty());
     let (size, min, resizable) = if show_onboarding {

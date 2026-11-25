@@ -6,10 +6,24 @@ description = "Patina: containers and Linux machines for your Mac. A native Rust
 default-run = "patina"
 
 [dependencies]
+block2 = "0.6.2"
+bollard = "0.21.1"
+chrono = "0.4.45"
+dispatch2 = "0.3.1"
 eframe = "0.31"
 egui = "0.31"
 egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
+futures-util = "0.3.34"
+libc = "0.2.191"
+objc2 = { version = "0.6.5", features = ["catch-all"] }
+objc2-foundation = "0.3.2"
+objc2-virtualization = "0.3.2"
 png = "0.17"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "signal"] }
+ureq = "2"
 
 [profile.dev]
 opt-level = 1

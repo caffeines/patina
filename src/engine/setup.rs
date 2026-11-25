@@ -6,7 +6,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -139,12 +139,84 @@ fn latest_docker(index: &str) -> Option<String> {
     best.map(|(_, v)| v)
 }
 
+/// The first run of digits: "Docker version 28.5.2, build …" is 28, "v2.39.1" is 2.
+fn major(version: &str) -> Option<u32> {
+    version.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()
+}
+
+/// A working `docker` (20+) or `docker-compose` (v2) already on this Mac:
+/// Docker Desktop's, Homebrew's (where Colima users get theirs), OrbStack's,
+/// or one on PATH. Never Patina's own.
+fn existing_tool(name: &str) -> Option<PathBuf> {
+    let home = paths::home();
+    let mut dirs: Vec<PathBuf> = vec![
+        "/Applications/Docker.app/Contents/Resources/bin".into(),
+        home.join(".docker/bin"),
+        "/opt/homebrew/bin".into(),
+        "/usr/local/bin".into(),
+        home.join(".orbstack/bin"),
+    ];
+    if name == "docker-compose" {
+        dirs.extend([
+            "/Applications/Docker.app/Contents/Resources/cli-plugins".into(),
+            home.join(".docker/cli-plugins"),
+            "/opt/homebrew/lib/docker/cli-plugins".into(),
+            "/usr/local/lib/docker/cli-plugins".into(),
+        ]);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    // Run each through its own path, not the resolved one: OrbStack's are
+    // links to one binary that acts on the name it was started as.
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .filter(|p| fs::canonicalize(p).is_ok_and(|real| !real.starts_with(paths::root())))
+        .find(|p| tool_works(p, name))
+}
+
+fn tool_works(path: &Path, name: &str) -> bool {
+    let (args, min): (&[&str], u32) = if name == "docker" { (&["--version"], 20) } else { (&["version", "--short"], 2) };
+    Command::new(path).args(args).output().is_ok_and(|o| o.status.success() && major(&String::from_utf8_lossy(&o.stdout)).is_some_and(|v| v >= min))
+}
+
+/// Copy `name` from another install into `dest`. False if there's none to copy.
+fn copy_existing(name: &str, dest: &Path, report: Report) -> bool {
+    let Some(src) = existing_tool(name) else { return false };
+    let real = fs::canonicalize(&src).unwrap_or_else(|_| src.clone());
+    let s = real.to_string_lossy();
+    let from = if s.contains("/Docker.app/") {
+        "Docker Desktop".to_string()
+    } else if s.contains("OrbStack") || s.contains("/.orbstack/") {
+        "OrbStack".to_string()
+    } else if s.starts_with("/opt/homebrew/") || s.contains("/Cellar/") {
+        "Homebrew".to_string()
+    } else {
+        s.replace(&*paths::home().to_string_lossy(), "~")
+    };
+    report(-1.0, &format!("Copying {name} from {from}"));
+    let tmp = dest.with_extension("part");
+    if fs::copy(&src, &tmp).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    make_executable(&tmp);
+    // The copy has to stand alone, away from the app it came from.
+    if fs::rename(&tmp, dest).is_err() || !tool_works(dest, name) {
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(dest);
+        return false;
+    }
+    true
+}
+
 /// Install `docker` and `docker-compose` into `~/.patina/bin`, add the
 /// `patina` docker context, and put `~/.patina/bin` on PATH (if enabled).
-/// The context becomes current when the engine starts.
+/// The context becomes current when the engine starts. Each tool is copied
+/// from an existing install when there's a working one, else downloaded.
 pub fn install_cli(report: Report) -> Result<(), String> {
     paths::ensure();
-    if !paths::docker_cli().exists() {
+    if !paths::docker_cli().exists() && !copy_existing("docker", &paths::docker_cli(), report) {
         report(-1.0, "Finding the latest docker command");
         let index = get_text(&format!("https://download.docker.com/mac/static/stable/{}/", arch()))?;
         let version = latest_docker(&index).ok_or("Couldn't find a docker release to download.")?;
@@ -159,7 +231,7 @@ pub fn install_cli(report: Report) -> Result<(), String> {
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_file(&tgz);
     }
-    if !paths::compose_cli().exists() {
+    if !paths::compose_cli().exists() && !copy_existing("docker-compose", &paths::compose_cli(), report) {
         let url = format!("https://github.com/docker/compose/releases/latest/download/docker-compose-darwin-{}", arch());
         download(&url, &paths::compose_cli(), report, "docker compose")?;
         make_executable(&paths::compose_cli());
@@ -338,6 +410,15 @@ mod tests {
     fn finds_the_newest_docker() {
         let index = r#"<a href="docker-27.5.1.tgz">docker-27.5.1.tgz</a> <a href="docker-28.10.0.tgz">x</a> <a href="docker-28.9.3.tgz">x</a> <a href="docker-rootless-extras-28.0.0.tgz">x</a>"#;
         assert_eq!(latest_docker(index).as_deref(), Some("28.10.0"));
+    }
+
+    #[test]
+    fn reads_tool_versions() {
+        assert_eq!(major("Docker version 28.5.2, build ecc6942"), Some(28));
+        assert_eq!(major("2.39.1\n"), Some(2));
+        assert_eq!(major("v2.40.3"), Some(2));
+        assert_eq!(major("docker-compose version 1.29.2, build 5becea4c"), Some(1));
+        assert_eq!(major("nope"), None);
     }
 
     #[test]

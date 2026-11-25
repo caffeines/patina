@@ -105,7 +105,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             if oa > 0.0 {
                 let mut op = p.clone();
                 op.multiply_opacity(oa);
-                w::text(&op, &cui, lx, ly + ody, "Linux aarch64", mono(12.0), TEXT);
+                let uname = if m.arch == "amd64" { "Linux x86_64" } else { "Linux aarch64" };
+                w::text(&op, &cui, lx, ly + ody, uname, mono(12.0), TEXT);
             }
             ly += 19.2 + 4.0;
             let (ca, cdy, _) = rise(now, t0, 1.8, 0.3, 10.0);
@@ -125,9 +126,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             w::put(&p, &g, term.center(), Align2::CENTER_CENTER);
         }
         let meta = format!(
-            "arm64 · {}",
-            if going {
+            "{} · {}",
+            m.arch,
+            if going && !m.up.is_empty() {
                 m.up.clone()
+            } else if going {
+                "running".into()
             } else {
                 match m.st {
                     St::Starting => "starting".into(),

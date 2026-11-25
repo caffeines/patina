@@ -6,7 +6,9 @@
 //! Docker daemon. Every UI action goes through a method on [`State`], so a
 //! real backend can replace this module without changing the views.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use crate::live::{self, Cmd as LCmd, EngineOp};
 
 pub type Job = Box<dyn FnOnce(&mut State)>;
 
@@ -173,6 +175,7 @@ pub enum ModalKind {
     Volume,
     Network,
     Reset,
+    Pull,
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +205,12 @@ pub struct Container {
     pub since: f64,
     /// When it was created in this session (entrance animation).
     pub born: f64,
+    pub ports_text: String,
+    pub net: String,
+    pub restart: String,
+    pub hostname: String,
+    /// Memory limit in MB (for the detail bar).
+    pub mem_limit: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -233,6 +242,8 @@ pub struct Net {
     pub fresh: bool,
     pub gone: bool,
     pub born: f64,
+    /// Containers on this network (live engine); `None` means "work it out from the group".
+    pub attached: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +258,7 @@ pub struct Machine {
     pub fresh_at: f64,
     pub since: f64,
     pub born: f64,
+    pub arch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -256,13 +268,25 @@ pub struct Pod {
     pub fresh_at: f64,
     pub shown: bool,
     pub shown_at: f64,
+    /// Live readiness ("1/1") and phase; empty in the simulation.
+    pub ready: String,
+    pub phase: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct Pull {
-    pub p: [f64; 4],
+    pub image: String,
+    /// (layer id, progress 0..1, size label)
+    pub layers: Vec<(String, f64, String)>,
     pub done: bool,
     pub err: bool,
+    pub msg: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pending {
+    St(St),
+    Gone,
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +505,34 @@ pub struct State {
     pub banner: Option<Banner>,
     /// A text field to focus on the next frame.
     pub focus: Option<&'static str>,
+
+    // ---- live engine
+    pub live: Option<live::Handle>,
+    pub pending: HashMap<String, Pending>,
+    pub pending_m: HashMap<String, St>,
+    pub pending_a: HashSet<String>,
+    pub pending_new: HashSet<String>,
+    pub engine_op: Option<EngineOp>,
+    op_saw_down: bool,
+    pub boot_at: f64,
+    pub ready_secs: f64,
+    pub info: live::Info,
+    /// The engine has a disk image (setup has run).
+    pub installed: bool,
+    /// The engine's own state while Docker isn't reachable yet.
+    pub engine_state: String,
+    pub engine_msg: String,
+    /// The app should show setup (onboarding).
+    pub want_setup: bool,
+    pub endpoint: String,
+    pub machines_ok: bool,
+    pub cfg: HashMap<String, String>,
+    pub engine_log: String,
+    pub urls: Vec<String>,
+    sent_sel: String,
+    seen_boxes: bool,
+    seen_assets: bool,
+    kube_busy: bool,
 }
 
 impl State {
@@ -564,6 +616,29 @@ impl State {
                 _ => None,
             },
             focus: None,
+            live: None,
+            pending: HashMap::new(),
+            pending_m: HashMap::new(),
+            pending_a: HashSet::new(),
+            pending_new: HashSet::new(),
+            engine_op: None,
+            op_saw_down: false,
+            boot_at: now,
+            ready_secs: 1.7,
+            info: live::Info::default(),
+            installed: true,
+            engine_state: String::new(),
+            engine_msg: String::new(),
+            want_setup: false,
+            endpoint: String::new(),
+            machines_ok: true,
+            cfg: HashMap::new(),
+            engine_log: String::new(),
+            urls: Vec::new(),
+            sent_sel: String::new(),
+            seen_boxes: false,
+            seen_assets: false,
+            kube_busy: false,
         };
 
         let mut cs = vec![
@@ -669,6 +744,7 @@ impl State {
             fresh: false,
             gone: false,
             born: -10.0,
+            attached: None,
         };
         s.nets = vec![
             net("bridge", "bridge", "172.17.0.0/16", true, "standalone"),
@@ -689,6 +765,7 @@ impl State {
                     fresh_at: -10.0,
                     since: -10.0,
                     born: -10.0,
+                    arch: "arm64".into(),
                 },
                 Machine {
                     id: "debian".into(),
@@ -701,6 +778,7 @@ impl State {
                     fresh_at: -10.0,
                     since: -10.0,
                     born: -10.0,
+                    arch: "arm64".into(),
                 },
             ];
         }
@@ -714,6 +792,8 @@ impl State {
                 fresh_at: -10.0,
                 shown: k_on,
                 shown_at: -10.0,
+                ready: String::new(),
+                phase: String::new(),
             })
             .collect();
         if k_on {
@@ -840,6 +920,11 @@ impl State {
             fresh_at: -10.0,
             since: -10.0,
             born: -10.0,
+            ports_text: String::new(),
+            net: String::new(),
+            restart: "unless-stopped".into(),
+            hostname: String::new(),
+            mem_limit: 256.0,
         }
     }
 
@@ -889,7 +974,16 @@ impl State {
     /// Advance the simulation to `now`: fire due timers and the 1.1 s pulse.
     pub fn tick(&mut self, now: f64) {
         self.time = now;
-        if now >= self.next_pulse {
+        if let Some(live) = &self.live {
+            for ev in live.drain() {
+                self.apply(ev);
+            }
+            if self.sel != self.sent_sel {
+                self.sent_sel = self.sel.clone();
+                self.send(LCmd::Select(self.sel.clone()));
+            }
+            self.next_pulse = now + 1.1;
+        } else if now >= self.next_pulse {
             self.pulse();
             self.next_pulse = now + 1.1;
         }
@@ -911,6 +1005,18 @@ impl State {
                 job(self);
             }
         }
+    }
+
+    fn send(&self, cmd: LCmd) {
+        if let Some(l) = &self.live {
+            l.send(cmd);
+        }
+    }
+
+    /// Show a container in a transitional state until the engine confirms.
+    fn pend(&mut self, id: &str, st: St) {
+        self.pending.insert(id.to_string(), Pending::St(st));
+        self.patch(id, |c| c.st = st);
     }
 
     fn patch(&mut self, id: &str, f: impl FnOnce(&mut Container)) {
@@ -1120,7 +1226,7 @@ impl State {
     pub fn ask_modal(&mut self, kind: ModalKind, target: &str) {
         self.open_ov(Ov::Modal);
         self.modal = Modal { kind: Some(kind), target: target.into(), value: String::new(), err: String::new() };
-        if matches!(kind, ModalKind::Volume | ModalKind::Network) {
+        if matches!(kind, ModalKind::Volume | ModalKind::Network | ModalKind::Pull) {
             self.focus = Some("modal-field");
         }
     }
@@ -1166,6 +1272,16 @@ impl State {
         }
         let st = c.st;
         let looping = c.loops > 0;
+        if self.live.is_some() {
+            if st == St::Running || st == St::Paused || looping {
+                self.pend(id, St::Stopping);
+                self.send(LCmd::Stop(id.into()));
+            } else if st == St::Stopped || st == St::Error {
+                self.pend(id, St::Starting);
+                self.send(LCmd::Start(id.into()));
+            }
+            return;
+        }
         if st == St::Running || st == St::Paused || looping {
             self.patch(id, |c| {
                 c.st = St::Stopping;
@@ -1192,6 +1308,11 @@ impl State {
         if c.st != St::Running || self.engine != Engine::Running {
             return;
         }
+        if self.live.is_some() {
+            self.pend(id, St::Starting);
+            self.send(LCmd::Restart(id.into()));
+            return;
+        }
         self.patch(id, |c| c.st = St::Stopping);
         let id = id.to_string();
         self.after(600, move |s| s.start_box(&id, 1100));
@@ -1200,6 +1321,20 @@ impl State {
     pub fn pause_box(&mut self, id: &str) {
         let Some(c) = self.cs.iter().find(|x| x.id == id) else { return };
         let now = self.time;
+        if self.live.is_some() {
+            match c.st {
+                St::Running => {
+                    self.pend(id, St::Paused);
+                    self.send(LCmd::Pause(id.into()));
+                }
+                St::Paused => {
+                    self.pend(id, St::Running);
+                    self.send(LCmd::Unpause(id.into()));
+                }
+                _ => {}
+            }
+            return;
+        }
         match c.st {
             St::Running => self.patch(id, |c| {
                 c.st = St::Paused;
@@ -1226,6 +1361,11 @@ impl State {
                 self.sel = first.clone();
                 self.panel_at = self.time;
             }
+        }
+        if self.live.is_some() {
+            self.pending.insert(id.to_string(), Pending::Gone);
+            self.send(LCmd::Remove(id.into()));
+            return;
         }
         self.toast_say(format!("Deleted {id}"), "Undo", Some(Undo::Box(id.to_string())));
     }
@@ -1264,6 +1404,13 @@ impl State {
         }
         self.after(560, |s| s.boot = 1);
         self.after(1120, |s| s.boot = 2);
+        if self.live.is_some() {
+            self.engine_op = Some(EngineOp::Restart);
+            self.op_saw_down = false;
+            self.boot_at = self.time;
+            self.send(LCmd::Engine(EngineOp::Restart));
+            return;
+        }
         self.after(1700, move |s| {
             s.engine = Engine::Ready;
             for (i, id) in was.into_iter().enumerate() {
@@ -1301,6 +1448,10 @@ impl State {
                     m.was = true;
                     m.since = now;
                 }
+                if self.live.is_some() {
+                    self.engine_op = Some(EngineOp::Stop);
+                    self.send(LCmd::Engine(EngineOp::Stop));
+                }
             }
             Engine::Off | Engine::Failed => self.cold_boot(),
             _ => {}
@@ -1308,12 +1459,22 @@ impl State {
     }
 
     pub fn cold_boot(&mut self) {
+        if self.live.is_some() && !self.installed {
+            self.want_setup = true;
+            return;
+        }
         self.engine = Engine::Booting;
         self.boot = 0;
         self.cold = true;
         self.show_log = false;
         self.after(560, |s| s.boot = 1);
         self.after(1120, |s| s.boot = 2);
+        if self.live.is_some() {
+            self.engine_op = Some(EngineOp::Start);
+            self.boot_at = self.time;
+            self.send(LCmd::Engine(EngineOp::Start));
+            return;
+        }
         self.after(1700, |s| {
             let back: Vec<String> = s.cs.iter().filter(|c| c.was && !c.gone).map(|c| c.id.clone()).collect();
             s.engine = Engine::Ready;
@@ -1360,7 +1521,10 @@ impl State {
         match kind {
             Kind::Nets => {
                 let Some(a) = self.nets.iter().find(|x| x.n == id) else { return };
-                let blocked = !a.grp.is_empty() && boxes.iter().any(|(_, g)| *g == a.grp);
+                let blocked = match a.attached {
+                    Some(n) => n > 0,
+                    None => !a.grp.is_empty() && boxes.iter().any(|(_, g)| *g == a.grp),
+                };
                 self.ask_modal(if blocked { ModalKind::NetBlocked } else { ModalKind::DelNet }, id);
             }
             Kind::Imgs | Kind::Vols => {
@@ -1381,6 +1545,16 @@ impl State {
 
     pub fn drop_asset(&mut self, kind: Kind, id: &str, undoable: bool) {
         self.set_gone(kind, id, true);
+        if self.live.is_some() {
+            self.pending_a.insert(id.to_string());
+            self.send(match kind {
+                Kind::Imgs => LCmd::RemoveImage(id.into()),
+                Kind::Vols => LCmd::RemoveVolume(id.into()),
+                Kind::Nets => LCmd::RemoveNetwork(id.into()),
+                Kind::Ms => LCmd::MachineDelete(id.into()),
+            });
+            return;
+        }
         self.toast_say(
             format!("Deleted {id}"),
             if undoable { "Undo" } else { "" },
@@ -1418,9 +1592,14 @@ impl State {
             let subnet = format!("172.{}.0.0/16", 17 + self.nets.len());
             self.nets.retain(|a| a.n != id);
             let born = self.time;
-            self.nets.push(Net { n: id.clone(), driver: "bridge".into(), subnet, sys: false, grp: String::new(), fresh: true, gone: false, born });
+            self.nets.push(Net { n: id.clone(), driver: "bridge".into(), subnet, sys: false, grp: String::new(), fresh: true, gone: false, born, attached: if self.live.is_some() { Some(0) } else { None } });
         }
         self.close_ov();
+        if self.live.is_some() {
+            self.pending_new.insert(id.clone());
+            self.send(if kind == Kind::Vols { LCmd::CreateVolume(id) } else { LCmd::CreateNetwork(id) });
+            return;
+        }
         self.toast_say(format!("Created {id}"), "", None);
     }
 
@@ -1438,6 +1617,11 @@ impl State {
             self.banner = None;
         }
         self.close_ov();
+        if self.live.is_some() {
+            self.pending_a.extend(spare);
+            self.send(LCmd::PruneImages);
+            return;
+        }
         self.toast_say(format!("Freed {}", fmt_size(freed)), "", None);
     }
 
@@ -1446,10 +1630,18 @@ impl State {
     }
 
     pub fn pull_image(&mut self) {
-        if self.engine != Engine::Running || self.pulled || self.pull_busy() {
+        if self.engine != Engine::Running || self.pull_busy() {
             return;
         }
-        self.pull = Some(Pull { p: [0.0; 4], done: false, err: false });
+        if self.live.is_some() {
+            self.ask_modal(ModalKind::Pull, "");
+            return;
+        }
+        if self.pulled {
+            return;
+        }
+        let layers = LAYERS.iter().map(|(id, size)| (id.to_string(), 0.0, size.to_string())).collect();
+        self.pull = Some(Pull { image: PULL_IMAGE.into(), layers, done: false, err: false, msg: String::new() });
         self.pull_gen += 1;
         self.pull_turn = 0;
         let gen = self.pull_gen;
@@ -1466,17 +1658,18 @@ impl State {
         }
         self.pull_turn += 1;
         if self.preset.scenario == "offline" && self.pull_turn > 3 {
-            self.pull = Some(Pull { err: true, ..cur });
+            let msg = "registry-1.docker.io cannot be reached. Check your connection, then try again.".to_string();
+            self.pull = Some(Pull { err: true, msg, ..cur });
             return;
         }
         let rate = [0.3, 0.17, 0.085, 0.5];
-        let mut p = cur.p;
-        for i in 0..4 {
+        let mut layers = cur.layers.clone();
+        for (i, l) in layers.iter_mut().enumerate() {
             let r = self.rnd();
-            p[i] = (p[i] + rate[i] * (0.7 + r * 0.6)).min(1.0);
+            l.1 = (l.1 + rate[i % 4] * (0.7 + r * 0.6)).min(1.0);
         }
-        let done = p.iter().all(|&x| x >= 1.0);
-        self.pull = Some(Pull { p, done, err: false });
+        let done = layers.iter().all(|l| l.1 >= 1.0);
+        self.pull = Some(Pull { layers, done, err: false, ..cur });
         if done {
             self.after(1100, |s| {
                 s.pull = None;
@@ -1490,6 +1683,34 @@ impl State {
         }
     }
 
+    /// Live engine: pull the image typed into the Pull dialog.
+    pub fn start_pull(&mut self, image: &str) {
+        let image = image.trim().to_string();
+        if image.is_empty() {
+            self.modal.err = "Enter an image, for example nginx:1.27-alpine.".into();
+            return;
+        }
+        if image.contains(char::is_whitespace) {
+            self.modal.err = "Image names can't contain spaces.".into();
+            return;
+        }
+        self.close_ov();
+        self.go_view(View::Images);
+        self.pull = Some(Pull { image: image.clone(), layers: Vec::new(), done: false, err: false, msg: String::new() });
+        self.send(LCmd::Pull(image));
+    }
+
+    pub fn retry_pull(&mut self) {
+        match (&self.live, &self.pull) {
+            (Some(_), Some(p)) => {
+                let image = p.image.clone();
+                self.pull = Some(Pull { image: image.clone(), layers: Vec::new(), done: false, err: false, msg: String::new() });
+                self.send(LCmd::Pull(image));
+            }
+            _ => self.pull_image(),
+        }
+    }
+
     // ------------------------------------------------------------- machines
 
     pub fn flip_machine(&mut self, id: &str) {
@@ -1498,6 +1719,22 @@ impl State {
             return;
         }
         let id = id.to_string();
+        if self.live.is_some() {
+            match m.st {
+                St::Running => {
+                    self.pending_m.insert(id.clone(), St::Stopping);
+                    self.patch_machine(&id, |m| m.st = St::Stopping);
+                    self.send(LCmd::MachineStop(id));
+                }
+                St::Stopped => {
+                    self.pending_m.insert(id.clone(), St::Starting);
+                    self.patch_machine(&id, |m| m.st = St::Starting);
+                    self.send(LCmd::MachineStart(id));
+                }
+                _ => {}
+            }
+            return;
+        }
         match m.st {
             St::Running => {
                 self.patch_machine(&id, |m| m.st = St::Stopping);
@@ -1528,6 +1765,28 @@ impl State {
         if self.ms.iter().any(|m| m.id == id && !m.gone) {
             id.push_str("-2");
         }
+        if self.live.is_some() {
+            let now = self.time;
+            self.ms.retain(|m| m.id != id);
+            self.ms.push(Machine {
+                id: id.clone(),
+                distro: pick.1.to_string(),
+                st: St::Starting,
+                up: String::new(),
+                was: false,
+                gone: false,
+                added: true,
+                fresh_at: -10.0,
+                since: now,
+                born: now,
+                arch: "arm64".into(),
+            });
+            self.pending_m.insert(id.clone(), St::Starting);
+            self.send(LCmd::MachineCreate { distro: pick.0.to_string(), name: id });
+            self.go_view(View::Machines);
+            self.close_ov();
+            return;
+        }
         self.mk.busy = true;
         let distro = pick.1.to_string();
         self.after(900, move |s| {
@@ -1544,6 +1803,7 @@ impl State {
                 fresh_at: -10.0,
                 since: now,
                 born: now,
+                arch: "arm64".into(),
             });
             s.go_view(View::Machines);
             s.close_ov();
@@ -1572,6 +1832,12 @@ impl State {
                     p.shown = false;
                 }
                 self.after(900, |s| s.kstep = 1);
+                if self.live.is_some() {
+                    self.after(2000, |s| s.kstep = 2);
+                    self.kube_busy = true;
+                    self.send(LCmd::Kube(true));
+                    return;
+                }
                 for (i, id) in PODS.iter().enumerate() {
                     self.after(1000 + 180 * i as u64, move |s| {
                         let now = s.time;
@@ -1602,6 +1868,10 @@ impl State {
                 for p in self.pods.iter_mut() {
                     p.shown = false;
                 }
+                if self.live.is_some() {
+                    self.kube_busy = true;
+                    self.send(LCmd::Kube(false));
+                }
             }
             Kube::Starting => {}
         }
@@ -1616,6 +1886,13 @@ impl State {
         for p in self.pods.iter_mut() {
             p.shown = false;
         }
+        if self.live.is_some() {
+            self.kube = Kube::Starting;
+            self.kstep = 0;
+            self.kube_busy = true;
+            self.send(LCmd::KubeReset);
+            return;
+        }
         self.after(600, |s| s.flip_kube());
     }
 
@@ -1628,6 +1905,24 @@ impl State {
     pub fn apply_set(&mut self) {
         let on = self.engine == Engine::Running;
         self.saved = (self.set.cpus, self.set.mem);
+        if self.live.is_some() && !on {
+            self.send(LCmd::ApplyResources { cpus: self.set.cpus, mem_mib: self.set.mem * 1024 });
+            self.toast_say("Saved. Applies when the engine starts.", "", None);
+            return;
+        }
+        if self.live.is_some() {
+            self.engine = Engine::Booting;
+            self.boot = 0;
+            self.cold = false;
+            self.engine_op = Some(EngineOp::Restart);
+            self.op_saw_down = false;
+            self.boot_at = self.time;
+            self.after(560, |s| s.boot = 1);
+            self.after(1120, |s| s.boot = 2);
+            self.send(LCmd::ApplyResources { cpus: self.set.cpus, mem_mib: self.set.mem * 1024 });
+            self.toast_say(format!("Restarting with {} cores and {} GB", self.set.cpus, self.set.mem), "", None);
+            return;
+        }
         self.reboot();
         let msg = if on {
             format!("Restarting with {} cores and {} GB", self.set.cpus, self.set.mem)
@@ -1696,6 +1991,11 @@ impl State {
         self.run.err.clear();
         self.run.perr.clear();
         self.run.busy = true;
+        if self.live.is_some() {
+            let port = self.run.port.trim().to_string();
+            self.send(LCmd::Run { image, name: id, host, port });
+            return;
+        }
         self.after(1500, move |s| {
             let hex: String = (0..12).map(|_| b"0123456789abcdef"[(s.rnd() * 16.0) as usize % 16] as char).collect();
             let mut c = s.mk_box(&id, &image, &host, "standalone", St::Starting, 0.5, 36.0, &hex, "just now");
@@ -1914,6 +2214,19 @@ impl State {
                 go: Box::new(|s| s.create_asset(Kind::Nets)),
                 ..base
             },
+            ModalKind::Pull => ModalSpec {
+                title: "Pull an image".into(),
+                body: "Downloads an image from its registry, such as Docker Hub.".into(),
+                field: true,
+                label: "Image",
+                ph: "nginx:1.27-alpine",
+                yes: "Pull".into(),
+                go: Box::new(|s| {
+                    let v = s.modal.value.clone();
+                    s.start_pull(&v)
+                }),
+                ..base
+            },
             ModalKind::Reset => ModalSpec {
                 title: "Reset the Kubernetes cluster?".into(),
                 body: "All workloads, services and stored cluster data are deleted. Your images are kept.".into(),
@@ -1929,8 +2242,493 @@ impl State {
         "14:02:09 vmm     creating VM with 4 CPUs, 8192 MB\n14:02:09 vmm     error: not enough free memory (1.1 GB free)\n14:02:09 engine  start failed after 0.4 s"
     }
 
+    // ----------------------------------------------------------- live engine
+
+    /// A state wired to the real engine. It starts empty and fills in as
+    /// the backend reports.
+    pub fn new_live(handle: live::Handle, nav: Preset, now: f64) -> State {
+        let mut s = State::new(Preset { scenario: "empty".into(), view: nav.view, pane: nav.pane, ..Default::default() }, now);
+        s.nets.clear();
+        s.pods.clear();
+        s.sel.clear();
+        s.engine = Engine::Booting;
+        s.cold = true;
+        s.live = Some(handle);
+        s.installed = crate::engine::setup::installed();
+        let cfg = crate::engine::config::load();
+        s.saved = (cfg.cpus, cfg.memory_gb);
+        s.set.cpus = cfg.cpus;
+        s.set.mem = cfg.memory_gb;
+        if s.installed && cfg.autostart && crate::engine::control::status().is_none() {
+            s.cold_boot();
+        }
+        s
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    pub fn refresh(&self) {
+        self.send(LCmd::Refresh);
+    }
+
+    pub fn open_terminal(&self, id: &str) {
+        self.send(LCmd::OpenTerminal(id.to_string()));
+    }
+
+    /// Change an engine setting (saved to `~/.patina/config.json`).
+    pub fn set_cfg(&mut self, key: &str, on: bool, needs_restart: bool) {
+        self.cfg.insert(key.to_string(), on.to_string());
+        self.send(LCmd::Config(key.to_string(), on.to_string()));
+        if needs_restart {
+            self.toast_say("Saved. Applies after the engine restarts.", "", None);
+        }
+    }
+
+    pub fn cfg_on(&self, key: &str) -> bool {
+        self.cfg.get(key).is_some_and(|v| v == "true")
+    }
+
+    pub fn apply(&mut self, ev: live::Ev) {
+        let now = self.time;
+        match ev {
+            live::Ev::Up(info) => {
+                let disk = self.info.disk_gb;
+                self.info = info;
+                if self.info.disk_gb == 0.0 {
+                    self.info.disk_gb = disk;
+                }
+                self.installed = true;
+                self.engine_state = "running".into();
+                self.endpoint = self.info.endpoint.clone();
+                match self.engine_op {
+                    Some(EngineOp::Stop) => {}
+                    Some(EngineOp::Restart) if !self.op_saw_down => {}
+                    op => {
+                        if !matches!(self.engine, Engine::Running | Engine::Ready) {
+                            self.cold = false;
+                            if op.is_some() {
+                                self.ready_secs = now - self.boot_at;
+                                self.engine = Engine::Ready;
+                                self.after(1700, |s| {
+                                    if s.engine == Engine::Ready {
+                                        s.engine = Engine::Running
+                                    }
+                                });
+                            } else {
+                                self.engine = Engine::Running;
+                            }
+                        }
+                    }
+                }
+            }
+            live::Ev::Down { installed, status } => {
+                self.installed = installed;
+                let state = status.as_ref().map(|s| s.state.clone()).unwrap_or_default();
+                if let Some(s) = &status {
+                    self.engine_msg = s.message.clone();
+                }
+                self.engine_state = state.clone();
+                match state.as_str() {
+                    "starting" => self.boot = 0,
+                    "booting" => self.boot = 1,
+                    "installing" => self.boot = 2,
+                    _ => {}
+                }
+                if let Some(op) = self.engine_op {
+                    if op == EngineOp::Restart && state != "running" {
+                        self.op_saw_down = true;
+                    }
+                    return;
+                }
+                match state.as_str() {
+                    "starting" | "booting" | "installing" => {
+                        if self.engine != Engine::Booting {
+                            self.engine = Engine::Booting;
+                            self.cold = true;
+                        }
+                    }
+                    "error" => {
+                        self.engine = Engine::Failed;
+                        self.cold = false;
+                        self.engine_log = crate::engine::control::log_tail(12);
+                    }
+                    "stopping" => {
+                        self.engine = Engine::Off;
+                        self.cold = false;
+                    }
+                    _ => {
+                        if self.engine != Engine::Failed {
+                            self.engine = Engine::Off;
+                            self.cold = false;
+                        }
+                    }
+                }
+            }
+            live::Ev::Containers(list) => self.merge_boxes(list),
+            live::Ev::Disk(gb) => self.info.disk_gb = gb,
+            live::Ev::Stats { id, cpu, mem_mb, limit_mb } => {
+                if let Some(c) = self.cs.iter_mut().find(|c| c.id == id && c.st == St::Running) {
+                    c.cpu = cpu;
+                    c.mem = mem_mb.round();
+                    if limit_mb > 0.0 {
+                        c.mem_limit = limit_mb;
+                    }
+                    c.bars.rotate_left(1);
+                    c.bars[11] = lv(cpu);
+                }
+            }
+            live::Ev::Inspect { id, why, restart, hostname, loops } => {
+                if let Some(c) = self.cs.iter_mut().find(|c| c.id == id) {
+                    c.why = why;
+                    c.restart = restart;
+                    c.hostname = hostname;
+                    if loops > 0 {
+                        c.loops = loops;
+                    }
+                }
+            }
+            live::Ev::Logs { id, lines, reset } => {
+                let lines: Vec<LogLine> = lines.into_iter().map(|(t, m, k)| LogLine { t, m, k }).collect();
+                if reset {
+                    self.logs.insert(id, lines);
+                } else {
+                    let list = self.logs.entry(id.clone()).or_default();
+                    list.extend(lines);
+                    let n = list.len();
+                    if n > 10 {
+                        list.drain(0..n - 10);
+                    }
+                    if id == self.sel {
+                        self.log_at = now;
+                    }
+                }
+            }
+            live::Ev::Assets { imgs, vols, nets } => {
+                let first = !self.seen_assets;
+                self.seen_assets = true;
+                let (pa, pn) = (self.pending_a.clone(), self.pending_new.clone());
+                let merge = |old: &[Asset], new: Vec<Asset>| -> Vec<Asset> {
+                    let mut out: Vec<Asset> = new
+                        .into_iter()
+                        .map(|mut a| {
+                            match old.iter().find(|o| o.n == a.n) {
+                                Some(o) => {
+                                    a.fresh = o.fresh;
+                                    a.born = o.born;
+                                }
+                                None if !first => {
+                                    a.fresh = true;
+                                    a.born = now;
+                                }
+                                None => {}
+                            }
+                            a.gone = pa.contains(&a.n);
+                            a
+                        })
+                        .collect();
+                    let keep: Vec<Asset> = old.iter().filter(|o| pn.contains(&o.n) && !out.iter().any(|a| a.n == o.n)).cloned().collect();
+                    out.extend(keep);
+                    out
+                };
+                self.imgs = merge(&self.imgs, imgs);
+                self.vols = merge(&self.vols, vols);
+                let mut out: Vec<Net> = nets
+                    .into_iter()
+                    .map(|mut a| {
+                        match self.nets.iter().find(|o| o.n == a.n) {
+                            Some(o) => {
+                                a.fresh = o.fresh;
+                                a.born = o.born;
+                            }
+                            None if !first => {
+                                a.fresh = true;
+                                a.born = now;
+                            }
+                            None => {}
+                        }
+                        a.gone = pa.contains(&a.n);
+                        a
+                    })
+                    .collect();
+                let keep: Vec<Net> = self.nets.iter().filter(|o| pn.contains(&o.n) && !out.iter().any(|a| a.n == o.n)).cloned().collect();
+                out.extend(keep);
+                self.nets = out;
+            }
+            live::Ev::Machines(list) => {
+                self.machines_ok = list.is_some();
+                let Some(list) = list else {
+                    self.ms.clear();
+                    return;
+                };
+                let mut out = Vec::new();
+                for m in list {
+                    let prev = self.ms.iter().find(|x| x.id == m.id).cloned();
+                    let st = self.pending_m.get(&m.id).copied().unwrap_or(m.st);
+                    let mut x = prev.clone().unwrap_or(Machine {
+                        id: m.id.clone(),
+                        distro: m.distro.clone(),
+                        st,
+                        up: String::new(),
+                        was: false,
+                        gone: false,
+                        added: self.seen_boxes,
+                        fresh_at: -10.0,
+                        since: now,
+                        born: if self.seen_boxes { now } else { -10.0 },
+                        arch: m.arch.clone(),
+                    });
+                    if x.st != st {
+                        x.since = now;
+                        if st == St::Running {
+                            x.fresh_at = now;
+                        }
+                    }
+                    x.st = st;
+                    x.distro = m.distro;
+                    x.arch = m.arch;
+                    x.gone = self.pending_a.contains(&x.id);
+                    out.push(x);
+                }
+                let keep: Vec<Machine> = self.ms.iter().filter(|m| self.pending_m.contains_key(&m.id) && !out.iter().any(|x| x.id == m.id)).cloned().collect();
+                out.extend(keep);
+                self.ms = out;
+            }
+            live::Ev::Kube { enabled, reachable, pods } => {
+                if !self.kube_busy {
+                    let all_running = !pods.is_empty() && pods.iter().all(|p| p.running);
+                    self.kube = if !enabled {
+                        Kube::Off
+                    } else if reachable && all_running {
+                        Kube::On
+                    } else {
+                        Kube::Starting
+                    };
+                }
+                if self.kube == Kube::Off {
+                    for p in self.pods.iter_mut() {
+                        p.shown = false;
+                    }
+                    return;
+                }
+                let mut out = Vec::new();
+                for p in pods {
+                    let prev = self.pods.iter().find(|x| x.id == p.id);
+                    let st = if p.running { St::Running } else { St::Starting };
+                    let fresh_at = match prev {
+                        Some(x) if x.st != St::Running && st == St::Running => now,
+                        Some(x) => x.fresh_at,
+                        None => -10.0,
+                    };
+                    let shown_at = match prev {
+                        Some(x) if x.shown => x.shown_at,
+                        _ => now,
+                    };
+                    out.push(Pod { id: p.id, st, fresh_at, shown: true, shown_at, ready: p.ready, phase: p.phase });
+                }
+                self.pods = out;
+            }
+            live::Ev::Config(map) => {
+                let clean = self.set.cpus == self.saved.0 && self.set.mem == self.saved.1;
+                let cpus = map.get("cpu").and_then(|v| v.parse::<u32>().ok());
+                let mem = map.get("memory_mib").and_then(|v| v.parse::<u32>().ok()).map(|m| (m + 512) / 1024);
+                if let (Some(c), Some(m)) = (cpus, mem) {
+                    self.saved = (c, m);
+                    if clean || self.cfg.is_empty() {
+                        self.set.cpus = c;
+                        self.set.mem = m;
+                    }
+                }
+                self.cfg = map;
+            }
+            live::Ev::Pull { image, layers, done, err } => {
+                let layers = layers.into_iter().map(|(id, f)| (id, f, String::new())).collect();
+                self.pull = Some(Pull { image: image.clone(), layers, done, err: err.is_some(), msg: err.unwrap_or_default() });
+                if done {
+                    self.after(1100, move |s| {
+                        if s.pull.as_ref().is_some_and(|p| p.done) {
+                            s.pull = None;
+                        }
+                        s.toast_say(format!("Pulled {image}"), "", None);
+                    });
+                }
+            }
+            live::Ev::Done { key, ok, msg } => {
+                let (kind, arg) = key.split_once(':').unwrap_or((key.as_str(), ""));
+                let arg = arg.to_string();
+                match kind {
+                    "box" => {
+                        self.pending.remove(&arg);
+                        if !ok {
+                            self.toast_say(msg, "", None);
+                        }
+                    }
+                    "rm" => {
+                        self.pending.remove(&arg);
+                        if !ok {
+                            self.patch(&arg, |c| c.gone = false);
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "run" => {
+                        self.run.busy = false;
+                        if ok {
+                            self.close_ov();
+                            self.sel = msg.clone();
+                            self.panel_at = now;
+                            self.go_view(View::Containers);
+                            self.filter = Filter::All;
+                            self.q.clear();
+                            self.toast_say(format!("Created {msg}"), "", None);
+                        } else {
+                            self.run.perr = msg;
+                        }
+                    }
+                    "pull" => {
+                        if !ok {
+                            let image = self.pull.as_ref().map(|p| p.image.clone()).unwrap_or_default();
+                            self.pull = Some(Pull { image, layers: Vec::new(), done: false, err: true, msg });
+                        }
+                    }
+                    "engine" => {
+                        let op = self.engine_op.take();
+                        self.op_saw_down = false;
+                        if !ok {
+                            self.engine = Engine::Failed;
+                            self.cold = false;
+                            let tail = crate::engine::control::log_tail(12);
+                            self.engine_log = if tail.is_empty() { msg } else { format!("{msg}\n\n{tail}") };
+                        } else if op == Some(EngineOp::Stop) {
+                            self.engine = Engine::Off;
+                        }
+                    }
+                    "asset" => {
+                        self.pending_a.remove(&arg);
+                        if !ok {
+                            for k in [Kind::Imgs, Kind::Vols, Kind::Nets, Kind::Ms] {
+                                self.set_gone(k, &arg, false);
+                            }
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "create" => {
+                        self.pending_new.remove(&arg);
+                        if !ok {
+                            self.vols.retain(|a| a.n != arg || !a.fresh);
+                            self.nets.retain(|a| a.n != arg || !a.fresh);
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "prune" => {
+                        if !ok {
+                            self.pending_a.clear();
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "machine" => {
+                        self.pending_m.remove(&arg);
+                        if !ok {
+                            self.toast_say(msg, "", None);
+                        }
+                    }
+                    "mk" => {
+                        self.pending_m.remove(&arg);
+                        if !ok {
+                            self.ms.retain(|m| m.id != arg);
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "kube" => {
+                        self.kube_busy = false;
+                        if !ok || !msg.is_empty() {
+                            self.toast_say(msg, "", None);
+                        }
+                    }
+                    _ => {
+                        if !ok {
+                            self.toast_say(msg, "", None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn merge_boxes(&mut self, list: Vec<live::BoxSnap>) {
+        let now = self.time;
+        let first = !self.seen_boxes;
+        self.seen_boxes = true;
+        let mut out = Vec::with_capacity(list.len());
+        for b in list {
+            let prev = self.cs.iter().find(|c| c.id == b.id).cloned();
+            let is_new = prev.is_none();
+            let mut c = match prev {
+                Some(p) => p,
+                None => {
+                    let mut c = self.mk_box(&b.id, &b.image, &b.port, &b.grp, b.st, 0.0, 0.0, &b.hex, &b.up);
+                    c.restart.clear();
+                    if !first {
+                        c.added = true;
+                        c.born = now;
+                    }
+                    c
+                }
+            };
+            c.image = b.image;
+            c.port = b.port;
+            c.ports_text = b.ports_text;
+            c.grp = b.grp;
+            c.net = b.net;
+            c.hex = b.hex;
+            c.up = b.up;
+            c.bad = b.bad;
+            let pending = self.pending.get(&c.id).copied();
+            let (st, gone) = match pending {
+                Some(Pending::St(p)) => (p, false),
+                Some(Pending::Gone) => (c.st, true),
+                None => {
+                    c.tag = b.tag;
+                    c.loops = if b.loops > 0 { c.loops.max(1) } else { 0 };
+                    (b.st, false)
+                }
+            };
+            if st != c.st {
+                c.since = now;
+                if st == St::Running && !is_new {
+                    c.fresh_at = now;
+                }
+                if !matches!(st, St::Error | St::Starting) && !c.bad {
+                    c.why.clear();
+                }
+            }
+            c.st = st;
+            c.gone = gone;
+            c.was = false;
+            if st != St::Running {
+                c.cpu = 0.0;
+                if st != St::Paused && !c.bars.iter().all(|&v| v == IDLE_BAR) {
+                    c.bars.rotate_left(1);
+                    c.bars[11] = IDLE_BAR;
+                }
+            }
+            out.push(c);
+        }
+        self.cs = out;
+        if !self.alive().any(|c| c.id == self.sel) {
+            let first = self.alive().next().map(|c| c.id.clone());
+            if let Some(f) = first {
+                self.sel = f;
+                self.panel_at = now;
+            }
+        }
+    }
+
     /// Memory used by the engine, in GB.
     pub fn used_gb(&self) -> f64 {
+        if self.live.is_some() {
+            return self.alive().filter(|c| matches!(c.st, St::Running | St::Paused)).map(|c| c.mem).sum::<f64>() / 1024.0;
+        }
         0.9 + self.alive().filter(|c| c.st == St::Running).map(|c| c.mem).sum::<f64>() / 1000.0
     }
 }

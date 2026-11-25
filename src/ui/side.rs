@@ -128,24 +128,49 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     };
     let rc = pos2(x + 11.0, y + 18.0);
     w::ring(&p, rc, 9.0, 1.0 - off / 56.6, ring_c, RING_TRACK, 2.0, rot);
-    let title = if boot {
+    let is_live = s.is_live();
+    let connecting = is_live && boot && s.engine_op.is_none() && s.engine_state.is_empty();
+    let (cpus, mem_gb, arch) = if is_live && s.info.cpus > 0 {
+        let from_cfg = !s.cfg.is_empty();
+        let cpus = if from_cfg { s.saved.0 } else { s.info.cpus };
+        let mem = if from_cfg { s.saved.1 as f64 } else { s.info.mem_gb };
+        (cpus, mem, if s.info.arch.is_empty() { "arm64".to_string() } else { s.info.arch.clone() })
+    } else {
+        (s.saved.0, s.saved.1 as f64, "arm64".to_string())
+    };
+    let title = if connecting {
+        "Connecting to Docker".to_string()
+    } else if boot && is_live {
+        match s.engine_state.as_str() {
+            "installing" => "Installing Docker".to_string(),
+            "booting" => "Booting Linux".to_string(),
+            _ => "Starting the VM".to_string(),
+        }
+    } else if boot {
         ["Booting kernel", "Starting agent", "Starting Docker Engine"][s.boot.min(2)].to_string()
     } else {
         match eng {
-            Engine::Ready => "Ready in 1.7 s".into(),
+            Engine::Ready => format!("Ready in {:.1} s", s.ready_secs),
+            Engine::Off if is_live && s.engine_op.is_some() => "Stopping the engine".into(),
             Engine::Off => "Engine stopped".into(),
             Engine::Failed => "Engine failed".into(),
             _ => "Engine running".into(),
         }
     };
-    let sub = if boot {
+    let sub = if connecting {
+        "Looking for the engine".to_string()
+    } else if boot && is_live && s.engine_state == "installing" {
+        "First start takes a few minutes".to_string()
+    } else if boot {
         "Starting".to_string()
     } else {
         match eng {
             Engine::Ready => "Resuming containers".into(),
+            Engine::Off if is_live && s.engine_op.is_some() => "Containers are shutting down".into(),
             Engine::Off => "Nothing is running".into(),
+            Engine::Failed if is_live => "See the log for details".into(),
             Engine::Failed => "Could not start the VM".into(),
-            _ => format!("{} CPU · {} GB · arm64", s.saved.0, s.saved.1),
+            _ => format!("{} CPU · {} GB · {}", cpus, fmt_gb(mem_gb), arch),
         }
     };
     w::text(&p, ui, x + 32.0, y + 9.5, &title, medium(13.5), TEXT);
@@ -154,10 +179,10 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
 
     // Memory
     let used = s.used_gb();
-    let mem_txt = if live { format!("{:.1} of {} GB", used, s.saved.1) } else { "—".into() };
+    let mem_txt = if live { format!("{:.1} of {} GB", used, fmt_gb(mem_gb)) } else { "—".into() };
     w::text(&p, ui, x, y + 8.0, "Memory", sans(12.0), MUTED);
     w::text_right(&p, ui, right, y + 8.0, &mem_txt, mono(11.5), TEXT2);
-    let frac = if live { (used / s.saved.1 as f64) as f32 } else { 0.0 };
+    let frac = if live { (used / mem_gb.max(0.1)) as f32 } else { 0.0 };
     let frac = cx.tw.f("eng-mem", frac, 1.0, Ease::STD);
     w::bar(&p, Rect::from_min_size(pos2(x, y + 24.0), vec2(right - x, 3.0)), frac, VERDIGRIS, TRACK);
     y += 27.0 + 14.0;
@@ -165,6 +190,9 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     // Buttons
     let btn = |label: &str| Btn::ghost(label).h(28.0).radius(8.0).pad(0.0).font(sans(12.5)).color(TEXT2).border(BTN_EDGE_SOFT);
     let full = right - x;
+    if connecting {
+        return;
+    }
     if live {
         let half = (full - 8.0) / 2.0;
         if btn("Restart").at(ui, Rect::from_min_size(pos2(x, y), vec2(half, 28.0)), Id::new("eng-restart")).clicked() {
@@ -178,5 +206,13 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
         if btn(label).at(ui, Rect::from_min_size(pos2(x, y), vec2(full, 28.0)), Id::new("eng-power")).clicked() {
             cx.fx.push(Box::new(|s| s.power_flip()));
         }
+    }
+}
+
+fn fmt_gb(gb: f64) -> String {
+    if (gb - gb.round()).abs() < 0.05 {
+        format!("{}", gb.round() as i64)
+    } else {
+        format!("{gb:.1}")
     }
 }

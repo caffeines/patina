@@ -50,8 +50,17 @@ fn list(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
     let mut n = 0usize;
     let mut menu_row: Option<(Container, Rect)> = None;
 
-    for (gid, glabel) in [("storefront", "storefront"), ("standalone", "Standalone")] {
+    // Compose projects first (by name), then standalone containers.
+    let mut groups: Vec<String> = cs.iter().map(|c| c.grp.clone()).filter(|g| g != "standalone").collect();
+    groups.sort();
+    groups.dedup();
+    groups.push("standalone".into());
+    for gid in groups.iter().map(String::as_str) {
+        let glabel = if gid == "standalone" { "Standalone" } else { gid };
         let grp: Vec<&Container> = cs.iter().filter(|c| c.grp == gid).collect();
+        if grp.is_empty() {
+            continue;
+        }
         let mine: Vec<&Container> = grp.iter().copied().filter(|c| !c.gone).collect();
         let open = mine.iter().any(|c| matches(c, filter, &q));
         let going = mine.iter().filter(|c| c.st == St::Running).count();
@@ -70,15 +79,16 @@ fn list(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
             let cy = r.top() + 6.0 + 15.5;
             let lab = w::g_ls(&gui, glabel, semibold(12.0), TEXT2, 0.48);
             let lr = w::put(&p, &lab, pos2(r.left() + 14.0, cy), Align2::LEFT_CENTER);
-            let meta = format!("{}{} of {} running", if gid == "storefront" { "Compose · " } else { "" }, going, mine.len());
+            let meta = format!("{}{} of {} running", if gid != "standalone" { "Compose · " } else { "" }, going, mine.len());
             w::text(&p, &gui, lr.right() + 10.0, cy, &meta, sans(12.0), MUTED);
-            if gid == "storefront" && live {
+            if gid != "standalone" && live {
                 let label = if going > 0 { "Stop all" } else { "Start all" };
                 let b = Btn::plain(label).h(24.0).pad(9.0).radius(6.0).font(sans(12.0)).color(MUTED);
                 let (resp, _) = b.at_right(&mut gui, r.right() - 8.0, cy, Id::new(("grp-all", gid)));
                 if resp.clicked() {
                     let stop = going > 0;
-                    cx.fx.push(Box::new(move |s| s.group_all("storefront", stop)));
+                    let gid = gid.to_string();
+                    cx.fx.push(Box::new(move |s| s.group_all(&gid, stop)));
                 }
             }
         }
@@ -155,8 +165,12 @@ fn container_row(ui: &mut Ui, cx: &mut Cx, c: &Container, row: Rect, selected: b
     let hold = c.st == St::Paused;
     let stoppable = run || hold || c.loops > 0;
 
-    let tag = if c.loops > 0 {
+    let tag = if c.loops > 0 && c.tag.is_empty() {
         format!("restarting ×{}", c.loops)
+    } else if c.loops > 1 {
+        format!("{} ×{}", c.tag, c.loops)
+    } else if c.loops > 0 {
+        c.tag.clone()
     } else if hold {
         "paused".to_string()
     } else {
@@ -257,7 +271,13 @@ fn context_menu(ctx: &Context, cx: &mut Cx, c: &Container, row: Rect, origin: Po
     let items = vec![
         item("Open in browser", run && !port.is_empty(), {
             let port = port.clone();
-            move |s| s.toast_say(format!("Opening localhost:{port}"), "", None)
+            move |s| {
+                if s.is_live() {
+                    s.urls.push(format!("http://localhost:{port}"));
+                } else {
+                    s.toast_say(format!("Opening localhost:{port}"), "", None)
+                }
+            }
         }),
         item("Open a terminal", run, {
             let id = id.clone();
@@ -376,6 +396,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
     };
     let logs = s.logs.get(&c0.id).cloned().unwrap_or_default();
     let (tab, panel_at, tab_at, log_at, view_at) = (s.tab, s.panel_at, s.tab_at, s.log_at, s.view_at);
+    let live_mode = s.is_live();
     let now = cx.now;
     let iw = wd - 40.0;
     let run = c0.st == St::Running;
@@ -465,7 +486,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
     let cpu = if run { format!("{:.1}%", c0.cpu) } else { "—".into() };
     let mem = if run || held { format!("{} MB", c0.mem as i64) } else { "—".into() };
     let cpu_f = if run { (c0.cpu * 9.0 / 100.0).min(1.0) as f32 } else { 0.0 };
-    let mem_f = if run || held { (c0.mem / 256.0).min(1.0) as f32 } else { 0.0 };
+    let mem_f = if run || held { (c0.mem / c0.mem_limit.max(1.0)).min(1.0) as f32 } else { 0.0 };
     for (i, (label, val, f)) in [("CPU", cpu, cpu_f), ("Memory", mem, mem_f)].into_iter().enumerate() {
         let cx0 = x + i as f32 * (col_w + 16.0);
         w::text(&tp, &tui, cx0, y + 8.5, label, sans(12.0), MUTED);
@@ -556,7 +577,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
             if oa > 0.0 {
                 let mut op = bp.clone();
                 op.multiply_opacity(oa);
-                w::text(&op, &bui, lx, ly + ody, &c0.hex, mono(12.0), TEXT);
+                let host = if c0.hostname.is_empty() { &c0.hex } else { &c0.hostname };
+                w::text(&op, &bui, lx, ly + ody, host, mono(12.0), TEXT);
             }
             ly += lh;
             let (ca, cdy, _) = crate::tween::rise(now, now - t as f64, 1.5, 0.3, 10.0);
@@ -566,6 +588,14 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
                 let pr = w::text(&op, &bui, lx, ly + cdy, "/ #", mono(12.0), VERDIGRIS);
                 w::cursor_block(&op, Rect::from_min_size(pos2(pr.right() + 8.0, ly + cdy - 7.5), vec2(7.0, 15.0)), now);
             }
+            if live_mode {
+                let b = Btn::ghost("Open in Terminal").h(30.0).pad(12.0).radius(8.0).font(medium(12.5)).color(TEXT2);
+                let (r, _) = b.at_right(&mut bui, body.right() - 12.0, body.bottom() - 12.0 - 15.0, Id::new("open-term"));
+                if r.clicked() {
+                    let id = c0.id.clone();
+                    cx.fx.push(Box::new(move |s| s.open_terminal(&id)));
+                }
+            }
         }
         Tab::Term => {
             w::fill(&bp, body, 10.0, TERM);
@@ -573,13 +603,27 @@ fn detail(ui: &mut Ui, cx: &mut Cx, origin: Pos2, wd: f32) -> f32 {
             w::put(&bp, &g, body.center(), Align2::CENTER_CENTER);
         }
         Tab::Info => {
+            let ports = if !c0.ports_text.is_empty() {
+                c0.ports_text.clone()
+            } else if c0.port.is_empty() {
+                "none published".into()
+            } else {
+                format!("{} → {}/tcp", c0.port, c0.port)
+            };
+            let net = if !c0.net.is_empty() {
+                c0.net.clone()
+            } else if c0.grp != "standalone" {
+                format!("{}_default", c0.grp)
+            } else {
+                "bridge".into()
+            };
             let rows = [
                 ("Image", c0.image.clone()),
-                ("Ports", if c0.port.is_empty() { "none published".into() } else { format!("{} → {}/tcp", c0.port, c0.port) }),
-                ("Network", if c0.grp == "storefront" { "storefront_default".into() } else { "bridge".into() }),
-                ("Project", if c0.grp == "storefront" { "storefront (Compose)".into() } else { "none".into() }),
+                ("Ports", ports),
+                ("Network", net),
+                ("Project", if c0.grp != "standalone" { format!("{} (Compose)", c0.grp) } else { "none".into() }),
                 ("ID", c0.hex.clone()),
-                ("Restart", "unless-stopped".into()),
+                ("Restart", if c0.restart.is_empty() { "…".into() } else { c0.restart.clone() }),
             ];
             let mut ly = body.top() + 8.75;
             for (k, v) in rows {

@@ -225,6 +225,27 @@ pub fn g_elide(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32) ->
     ui.fonts(|f| f.layout_job(j))
 }
 
+/// Like [`g_elide`], but drops the start of the text, so the end (an image tag) stays visible.
+pub fn g_elide_start(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32) -> Arc<Galley> {
+    let full = g(ui, text, font.clone(), color);
+    if full.size().x <= max_w {
+        return full;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let tail: String = std::iter::once('…').chain(chars[chars.len() - mid..].iter().copied()).collect();
+        if g(ui, &tail, font.clone(), color).size().x <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let tail: String = std::iter::once('…').chain(chars[chars.len() - lo..].iter().copied()).collect();
+    g(ui, &tail, font, color)
+}
+
 pub fn g_wrap(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32, line_h: f32) -> Arc<Galley> {
     let mut j = job(text, font, color, 0.0);
     j.sections[0].format.line_height = Some(line_h);

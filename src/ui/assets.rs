@@ -1,10 +1,10 @@
 //! Images, volumes and networks: one table, plus the image pull progress.
 
-use egui::{pos2, vec2, Align2, Id, Rect, Stroke, Ui, UiBuilder};
+use egui::{pos2, vec2, Align2, Id, Rect, Ui, UiBuilder};
 
 use super::{enter, Cx};
 use crate::icons::{self, Ink};
-use crate::sim::{fmt_size, Kind, St, View, LAYERS, PULL_IMAGE};
+use crate::sim::{fmt_size, Kind, St, View};
 use crate::theme::*;
 use crate::tween::Ease;
 use crate::widgets::{self as w, Btn};
@@ -41,7 +41,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         cx.s.nets
             .iter()
             .map(|a| {
-                let att = if a.grp.is_empty() { 0 } else { boxes.iter().filter(|b| b.1 == a.grp).count() };
+                let att = a.attached.unwrap_or_else(|| if a.grp.is_empty() { 0 } else { boxes.iter().filter(|b| b.1 == a.grp).count() });
                 Row {
                     n: a.n.clone(),
                     frac: att as f32 / boxes.len().max(1) as f32,
@@ -116,7 +116,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
             }
             let cy = row.center().y;
             let mut x = row.left() + 14.0;
-            let g1 = w::g_elide(&rui, &r.n, mono(12.5), TEXT, c1_w);
+            let g1 = w::g_elide_start(&rui, &r.n, mono(12.5), TEXT, c1_w);
             w::put(&p, &g1, pos2(x, cy), Align2::LEFT_CENTER);
             x += c1_w + 18.0;
             // size bar grows in from the left
@@ -158,11 +158,17 @@ fn pull_card(ui: &mut Ui, cx: &mut Cx) {
     let wd = ui.available_width();
     let bad = pull.err;
     let end = pull.done;
-    let h = 18.0 + 28.0 + 16.0 + if bad { 18.0 + 16.0 } else { 0.0 } + 27.0 + 18.0;
+    let x0 = ui.cursor().min.x + 20.0;
+    let iw = wd - 40.0;
+    let err_g = (bad && !pull.msg.is_empty()).then(|| w::g_wrap(ui, &pull.msg, sans(12.5), DANGER_TEXT, iw, 17.5));
+    let rows = pull.layers.len().div_ceil(4);
+    let layers_h = if rows == 0 { 0.0 } else { rows as f32 * 27.0 + (rows - 1) as f32 * 14.0 + 16.0 };
+    let err_h = err_g.as_ref().map_or(0.0, |g| g.size().y + 16.0);
+    let h = 18.0 + 28.0 + err_h + layers_h + 18.0;
     let (rect, _) = ui.allocate_exact_size(vec2(wd, h), egui::Sense::hover());
     let p = ui.painter().clone();
     w::card(&p, rect, 14.0, CARD, CARD_EDGE);
-    let x = rect.left() + 20.0;
+    let x = x0;
     let right = rect.right() - 20.0;
     let mut y = rect.top() + 18.0;
     let cy = y + 14.0;
@@ -177,36 +183,58 @@ fn pull_card(ui: &mut Ui, cx: &mut Cx) {
         w::spin_ring(&p, mc, 6.25, 1.5, rgba(212, 145, 92, 0.25), COPPER, cx.now, 0.8);
         cx.ambient = true;
     }
-    let title = format!("{} {}", if bad { "Could not pull" } else if end { "Pulled" } else { "Pulling" }, PULL_IMAGE);
-    w::text(&p, ui, x + 14.0 + 12.0, cy, &title, mono(12.5), TEXT);
+    let verb = if bad {
+        "Could not pull"
+    } else if end {
+        "Pulled"
+    } else if pull.layers.is_empty() {
+        "Resolving"
+    } else {
+        "Pulling"
+    };
+    let title = format!("{verb} {}", pull.image);
     let mut r_edge = right;
     if bad {
         let (resp, br) = Btn::ghost("Try again").h(28.0).pad(12.0).radius(8.0).at_right(ui, right, cy, Id::new("pull-retry"));
         if resp.clicked() {
-            cx.fx.push(Box::new(|s| s.pull_image()));
+            cx.fx.push(Box::new(|s| s.retry_pull()));
         }
         r_edge = br.left() - 12.0;
-    } else {
-        let pct = (pull.p.iter().sum::<f64>() / 4.0 * 100.0).round() as i64;
-        w::text_right(&p, ui, r_edge, cy, &format!("{pct}%"), mono(12.0), TEXT2);
+    } else if !pull.layers.is_empty() {
+        let pct = (pull.layers.iter().map(|l| l.1).sum::<f64>() / pull.layers.len() as f64 * 100.0).round() as i64;
+        let r = w::text_right(&p, ui, r_edge, cy, &format!("{pct}%"), mono(12.0), TEXT2);
+        r_edge = r.left() - 12.0;
     }
-    let _ = r_edge;
-    y += 28.0 + 16.0;
-    if bad {
-        w::text(&p, ui, x, y + 9.0, "registry-1.docker.io cannot be reached. Check your connection, then try again.", sans(12.5), DANGER_TEXT);
-        y += 18.0 + 16.0;
+    let tg = w::g_elide(ui, &title, mono(12.5), TEXT, r_edge - (x + 26.0));
+    w::put(&p, &tg, pos2(x + 26.0, cy), Align2::LEFT_CENTER);
+    y += 28.0;
+    if let Some(g) = err_g {
+        y += 16.0;
+        p.galley(pos2(x, y), g.clone(), DANGER_TEXT);
+        y += g.size().y;
+    }
+    if rows > 0 {
+        y += 16.0;
     }
     let col_w = (right - x - 3.0 * 14.0) / 4.0;
-    for (i, v) in pull.p.iter().enumerate() {
-        let lx = x + i as f32 * (col_w + 14.0);
+    for (i, (id, v, size)) in pull.layers.iter().enumerate() {
+        let lx = x + (i % 4) as f32 * (col_w + 14.0);
+        let ly = y + (i / 4) as f32 * (27.0 + 14.0);
         let col = if *v >= 1.0 { VERDIGRIS } else if bad { DANGER } else { COPPER };
-        let col = cx.tw.c(("layer-c", i), col, 0.7);
-        let fw = cx.tw.f(("layer", i), *v as f32, 0.3, Ease::LINEAR);
-        w::bar(&p, Rect::from_min_size(pos2(lx, y), vec2(col_w, 3.0)), fw, col, TRACK);
-        let (id, size) = LAYERS[i];
-        let label = if *v >= 1.0 { "done" } else if bad { "stalled" } else { size };
-        w::text(&p, ui, lx, y + 3.0 + 7.0 + 8.0, id, mono(11.5), MUTED);
-        w::text_right(&p, ui, lx + col_w, y + 3.0 + 7.0 + 8.0, label, mono(11.5), MUTED);
+        let col = cx.tw.c(("layer-c", id), col, 0.7);
+        let fw = cx.tw.f(("layer", id), *v as f32, 0.3, Ease::LINEAR);
+        w::bar(&p, Rect::from_min_size(pos2(lx, ly), vec2(col_w, 3.0)), fw, col, TRACK);
+        let label = if *v >= 1.0 {
+            "done".to_string()
+        } else if bad {
+            "stalled".to_string()
+        } else if size.is_empty() {
+            format!("{}%", (v * 100.0).round() as i64)
+        } else {
+            size.clone()
+        };
+        let short: String = id.chars().take(7).collect();
+        w::text(&p, ui, lx, ly + 3.0 + 7.0 + 8.0, &short, mono(11.5), MUTED);
+        w::text_right(&p, ui, lx + col_w, ly + 3.0 + 7.0 + 8.0, &label, mono(11.5), MUTED);
     }
-    let _ = Stroke::NONE;
 }

@@ -199,7 +199,13 @@ fn summary(s: &State, view: View) -> String {
     }
     let _ = down;
     if s.engine == Engine::Booting && s.cold && !is_set {
-        return "Starting the engine".into();
+        return if s.is_live() && s.engine_state == "installing" {
+            "Installing Docker Engine. The first start takes a few minutes.".into()
+        } else if s.is_live() && s.engine_op.is_none() && s.engine_state.is_empty() {
+            "Connecting to the engine".into()
+        } else {
+            "Starting the engine".into()
+        };
     }
     let tally = |st: St| s.alive().filter(|c| c.st == st).count();
     match view {
@@ -291,11 +297,11 @@ struct Block {
     yes: String,
     go: Job,
     no: Option<(String, Job)>,
-    log: bool,
+    log: Option<String>,
 }
 
 fn block(d: &'static str, title: impl Into<String>, body: impl Into<String>, yes: &str, go: Job) -> Block {
-    Block { d, ring: DASH, ink: MUTED, title: title.into(), body: body.into(), yes: yes.into(), go, no: None, log: false }
+    Block { d, ring: DASH, ink: MUTED, title: title.into(), body: body.into(), yes: yes.into(), go, no: None, log: None }
 }
 
 fn blocking(s: &State) -> Option<Block> {
@@ -304,30 +310,50 @@ fn blocking(s: &State) -> Option<Block> {
     let cold = s.engine == Engine::Booting && s.cold && !is_set;
     let q = s.q.trim().to_lowercase();
     if !is_set && s.engine == Engine::Off {
-        return Some(block(
-            icons::PLUG,
-            "The engine is stopped",
-            "Containers, images, volumes and machines are unavailable until it starts.",
-            "Start engine",
-            Box::new(|s| s.cold_boot()),
-        ));
+        if s.is_live() && (s.engine_op.is_some() || s.engine_state == "stopping") {
+            return Some(block(icons::PLUG, "Stopping the engine", "Containers are shutting down, then Linux turns off.", "Start engine", Box::new(|s| s.cold_boot())));
+        }
+        if s.is_live() && !s.installed {
+            return Some(block(
+                icons::PLUG,
+                "Patina isn't set up yet",
+                "Setup downloads a small Linux system and installs Docker Engine in it. It takes a few minutes, once.",
+                "Set up Patina",
+                Box::new(|s| s.want_setup = true),
+            ));
+        }
+        let body = if s.is_live() {
+            "Containers, images and volumes are unavailable until it starts."
+        } else {
+            "Containers, images, volumes and machines are unavailable until it starts."
+        };
+        return Some(block(icons::PLUG, "The engine is stopped", body, "Start engine", Box::new(|s| s.cold_boot())));
     }
     if !is_set && s.engine == Engine::Failed {
-        let mut b = block(
-            icons::PLUG,
-            "The engine could not start",
-            "macOS refused to create the virtual machine because too little memory is free. Close a few apps, or lower the memory limit in Settings.",
-            "Try again",
-            Box::new(|s| s.cold_boot()),
-        );
+        let body = if s.is_live() {
+            "The engine reported an error while starting. Check the log, then try again."
+        } else {
+            "macOS refused to create the virtual machine because too little memory is free. Close a few apps, or lower the memory limit in Settings."
+        };
+        let mut b = block(icons::PLUG, "The engine could not start", body, "Try again", Box::new(|s| s.cold_boot()));
         b.ring = ERR_EDGE;
         b.ink = DANGER;
         b.no = Some((if s.show_log { "Hide log" } else { "Show log" }.into(), Box::new(|s| s.show_log = !s.show_log)));
-        b.log = s.show_log;
+        if s.show_log {
+            b.log = Some(if s.is_live() { s.engine_log.clone() } else { State::boot_log().to_string() });
+        }
         return Some(b);
     }
     if cold {
         return None;
+    }
+    if s.is_live() && !s.machines_ok && matches!(view, View::Machines | View::Kubernetes) {
+        let (title, body) = if view == View::Machines {
+            ("Linux machines aren't ready yet", "Patina's engine runs containers today. Full Linux machines that share it are next.")
+        } else {
+            ("Kubernetes isn't ready yet", "A local cluster on Patina's engine is next. Containers, images, volumes and networks work today.")
+        };
+        return Some(block(icons::nav(view), title, body, "Show containers", Box::new(|s| s.go_view(View::Containers))));
     }
     let boxes: Vec<_> = s.alive().collect();
     if view == View::Containers {
@@ -444,7 +470,7 @@ fn show_block(ui: &mut Ui, cx: &mut Cx, b: Block) {
         ui.fonts(|f| f.layout_job(j))
     };
     let title = w::g_ls(ui, &b.title, semibold(19.0), TEXT, -0.285);
-    let log = b.log.then(|| w::g_wrap(ui, State::boot_log(), mono(11.5), CODE, 560.0f32.min(wd) - 32.0, 19.5));
+    let log = b.log.as_ref().map(|text| w::g_wrap(ui, if text.is_empty() { "No output." } else { text }, mono(11.5), CODE, 560.0f32.min(wd) - 32.0, 19.5));
     let content_h = 72.0 + 6.0 + 12.0 + title.size().y + 12.0 + body.size().y + 12.0 + 8.0 + 34.0 + log.as_ref().map_or(0.0, |g| 12.0 + 10.0 + g.size().y + 28.0);
     let h = content_h.max(440.0) + 48.0;
     let (rect, _) = ui.allocate_exact_size(vec2(wd, h), Sense::hover());

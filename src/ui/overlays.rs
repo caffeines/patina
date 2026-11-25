@@ -203,7 +203,7 @@ fn run(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: bool) {
         y += g.size().y + 22.0 + 18.0;
     }
 
-    let yes = Btn::cta(if busy { "Pulling" } else { "Run" }).spin(busy);
+    let yes = Btn::cta(if !busy { "Run" } else if cx.s.is_live() { "Starting" } else { "Pulling" }).spin(busy);
     if busy {
         cx.ambient = true;
     }

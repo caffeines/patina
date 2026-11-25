@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use egui::{Id, Key, Modifiers, ViewportCommand};
 
+use crate::live;
 use crate::onboarding::{self, Onb};
 use crate::sim::{Ov, Preset, State};
 use crate::theme;
@@ -18,6 +19,8 @@ pub struct Args {
     pub step: usize,
     pub screenshot: Option<PathBuf>,
     pub wait: f64,
+    /// Use the simulated engine instead of real Docker.
+    pub demo: bool,
 }
 
 struct Shot {
@@ -33,6 +36,7 @@ pub struct App {
     started: f64,
     preset: Preset,
     shot: Option<Shot>,
+    demo: bool,
 }
 
 pub const MAIN_SIZE: [f32; 2] = [1360.0, 860.0];
@@ -45,10 +49,16 @@ impl App {
         theme::install_style(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let now = cc.egui_ctx.input(|i| i.time);
+        let s = if args.demo {
+            State::new(args.preset.clone(), now)
+        } else {
+            State::new_live(live::spawn(cc.egui_ctx.clone()), args.preset.clone(), now)
+        };
         App {
-            s: State::new(args.preset.clone(), now),
+            demo: args.demo,
+            s,
             tw: Tweens::default(),
-            onb: show_onboarding.then(|| Onb::new(now, args.step.max(1))),
+            onb: show_onboarding.then(|| Onb::new(now, args.step.max(1), !args.demo, Some(cc.egui_ctx.clone()))),
             started: now,
             preset: args.preset.clone(),
             shot: args.screenshot.map(|path| Shot { path, at: now + args.wait, sent: false }),
@@ -81,7 +91,13 @@ impl App {
     fn finish_onboarding(&mut self, ctx: &egui::Context, now: f64) {
         mark_onboarded();
         self.onb = None;
-        self.s = State::new(self.preset.clone(), now);
+        if self.demo {
+            self.s = State::new(self.preset.clone(), now);
+        } else {
+            self.s.installed = crate::engine::setup::installed();
+            self.s.refresh();
+        }
+        self.s.view_at = now;
         self.started = now;
         let size = egui::vec2(MAIN_SIZE[0], MAIN_SIZE[1]);
         ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
@@ -95,6 +111,15 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Screenshot runs open a real window; make sure no stray click or key
+    /// can reach it (it may be connected to a real Docker engine).
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.shot.is_some() {
+            raw.events.retain(|e| matches!(e, egui::Event::Screenshot { .. }));
+            raw.modifiers = Default::default();
+        }
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::BG.to_normalized_gamma_f32()
     }
@@ -123,6 +148,15 @@ impl eframe::App for App {
         }
 
         self.s.tick(now);
+        if self.s.want_setup && !self.demo {
+            self.s.want_setup = false;
+            self.onb = Some(Onb::new(now, 2, true, Some(ctx.clone())));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(egui::vec2(ONB_SIZE[0], ONB_SIZE[1])));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(ONB_SIZE[0], ONB_SIZE[1])));
+            ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
+            ctx.request_repaint();
+            return;
+        }
 
         // Global shortcuts.
         let s = &mut self.s;
@@ -149,6 +183,9 @@ impl eframe::App for App {
         let acted = !fx.is_empty();
         for f in fx {
             f(&mut self.s);
+        }
+        for url in self.s.urls.drain(..) {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
         }
 
         if acted || self.tw.busy {

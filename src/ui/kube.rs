@@ -100,6 +100,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let top = if stacked { origin.y + card_h + gap } else { origin.y };
     let (a2, dy2) = enter(cx.tw, view_at, 0.2, 0.55);
     let pods: Vec<_> = cx.s.pods.iter().filter(|p| p.shown).cloned().collect();
+    let pods_running = crate::sim::fmt_count(pods.iter().filter(|p| p.st == St::Running).count(), "pod") + " running";
     let list_h = 37.0 + if kube == Kube::Off { 44.0 } else { pods.len() as f32 * 48.0 };
     let lrect = Rect::from_min_size(pos2(list_x, top + dy2), vec2(list_w, list_h));
     let mut lui = ui.new_child(UiBuilder::new().max_rect(lrect));
@@ -109,7 +110,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let lab = w::g_ls(&lui, "kube-system", semibold(12.0), TEXT2, 0.48);
     let lr = w::put(&lp, &lab, pos2(lrect.left() + 14.0, cy), Align2::LEFT_CENTER);
     let meta = if k_on {
-        "5 pods running"
+        &pods_running
     } else if k_busy {
         "starting"
     } else {
@@ -136,8 +137,10 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
         let ng = w::g_elide(&lui, &pd.id, mono(12.5), TEXT, name_w);
         w::put(&rp, &ng, pos2(row.left() + 14.0 + 22.0 + 14.0, rcy), Align2::LEFT_CENTER);
         let ready_r = row.right() - 14.0 - 130.0 - 14.0;
-        w::text_right(&rp, &lui, ready_r, rcy, if running { "1/1" } else { "0/1" }, mono(12.0), TEXT2);
-        w::text_right(&rp, &lui, row.right() - 14.0, rcy, if running { "Running" } else { "ContainerCreating" }, sans(12.5), MUTED);
+        let ready = if !pd.ready.is_empty() { pd.ready.as_str() } else if running { "1/1" } else { "0/1" };
+        let phase = if !pd.phase.is_empty() { pd.phase.as_str() } else if running { "Running" } else { "ContainerCreating" };
+        w::text_right(&rp, &lui, ready_r, rcy, ready, mono(12.0), TEXT2);
+        w::text_right(&rp, &lui, row.right() - 14.0, rcy, phase, sans(12.5), MUTED);
         y += 48.0;
     }
 

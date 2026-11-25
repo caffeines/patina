@@ -4,15 +4,17 @@
 use egui::{pos2, vec2, Align2, Id, Rect, Stroke, Ui, UiBuilder};
 
 use super::{swap, Cx};
-use crate::sim::{Pane, Settings, Upd};
+use crate::sim::{Pane, Settings, State, Upd};
 use crate::theme::*;
 use crate::widgets::{self as w, Btn};
 
 enum Ctl {
     Toggle(fn(&mut Settings) -> &mut bool),
+    /// An engine setting: config key, and whether it needs an engine restart.
+    Cfg(&'static str, bool),
     Slider(fn(&mut Settings) -> &mut u32, u32, u32, &'static str),
-    Text(&'static str),
-    Code(&'static str),
+    Text(String),
+    Code(String),
     Update,
 }
 
@@ -22,12 +24,15 @@ struct RowDef {
     ctl: Ctl,
 }
 
-fn row(label: &'static str, hint: &str, ctl: Ctl) -> RowDef {
+fn row(label: &'static str, hint: impl Into<String>, ctl: Ctl) -> RowDef {
     RowDef { label, hint: hint.into(), ctl }
 }
 
-fn rows(pane: Pane, upd: Upd) -> Vec<RowDef> {
-    match pane {
+fn rows(s: &State) -> Vec<RowDef> {
+    if s.is_live() {
+        return live_rows(s);
+    }
+    match s.pane {
         Pane::General => vec![
             row("Open at login", "Start Patina when you sign in to this Mac.", Ctl::Toggle(|s| &mut s.login)),
             row("Show in the menu bar", "Keep the status icon and quick controls in the menu bar.", Ctl::Toggle(|s| &mut s.menubar)),
@@ -37,33 +42,72 @@ fn rows(pane: Pane, upd: Upd) -> Vec<RowDef> {
         Pane::Resources => vec![
             row("CPU limit", "Cores the engine may use, out of 10 on this Mac.", Ctl::Slider(|s| &mut s.cpus, 1, 10, "cores")),
             row("Memory limit", "Memory the engine does not need is returned to macOS.", Ctl::Slider(|s| &mut s.mem, 2, 32, "GB")),
-            row("Disk image", "Grows as needed, up to the limit.", Ctl::Text("23.4 of 64 GB")),
+            row("Disk image", "Grows as needed, up to the limit.", Ctl::Text("23.4 of 64 GB".into())),
         ],
         Pane::Network => vec![
             row("Publish ports on localhost", "A container port you publish answers on localhost on this Mac.", Ctl::Toggle(|s| &mut s.ports)),
             row("Follow macOS DNS and VPN", "Containers resolve names and reach private networks the way this Mac does.", Ctl::Toggle(|s| &mut s.dns)),
-            row("Default subnet", "Used by the bridge network.", Ctl::Text("172.17.0.0/16")),
+            row("Default subnet", "Used by the bridge network.", Ctl::Text("172.17.0.0/16".into())),
         ],
         Pane::Engine => vec![
             row("Run Intel images with Rosetta", "Used for linux/amd64 images on Apple silicon.", Ctl::Toggle(|s| &mut s.rosetta)),
             row(
                 "daemon.json",
                 "Docker Engine configuration. Applied after a restart.",
-                Ctl::Code("{\n  \"features\": { \"buildkit\": true },\n  \"experimental\": false\n}"),
+                Ctl::Code("{\n  \"features\": { \"buildkit\": true },\n  \"experimental\": false\n}".into()),
             ),
         ],
         Pane::About => vec![
-            row("Version", "Patina for Apple silicon.", Ctl::Text(env!("CARGO_PKG_VERSION"))),
+            row("Version", "Patina for Apple silicon.", Ctl::Text(env!("CARGO_PKG_VERSION").into())),
             row(
                 "Updates",
-                match upd {
+                match s.upd {
                     Upd::Current => "Patina is up to date.",
                     Upd::Checking => "Checking for updates",
                     Upd::Idle => "Last checked today.",
                 },
                 Ctl::Update,
             ),
-            row("Engine", "Runs inside one small Linux VM.", Ctl::Text("Docker Engine")),
+            row("Engine", "Runs inside one small Linux VM.", Ctl::Text("Docker Engine".into())),
+        ],
+    }
+}
+
+/// Settings for Patina's own engine, stored in `~/.patina/config.json`.
+fn live_rows(s: &State) -> Vec<RowDef> {
+    use crate::engine::config::{host_cpus, host_mem_gb};
+    let i = &s.info;
+    let or = |v: &str, d: &str| if v.is_empty() { d.to_string() } else { v.to_string() };
+    let disk = if i.disk_gb > 0.0 { format!("{:.1} GB", i.disk_gb) } else { "—".into() };
+    let home = crate::engine::paths::home().display().to_string();
+    let short = |p: std::path::PathBuf| p.display().to_string().replacen(&home, "~", 1);
+    match s.pane {
+        Pane::General => vec![
+            row("Open at login", "Start Patina when you sign in to this Mac.", Ctl::Cfg("login", false)),
+            row("Start the engine on launch", "When off, start it from the engine card.", Ctl::Cfg("autostart", false)),
+        ],
+        Pane::Resources => {
+            let cores = host_cpus().max(s.saved.0).max(1);
+            let mem = host_mem_gb().max(s.saved.1).max(2);
+            vec![
+                row("CPU limit", format!("Cores the engine may use, out of {cores} on this Mac."), Ctl::Slider(|s| &mut s.cpus, 1, cores, "cores")),
+                row("Memory limit", "Memory the engine does not need is returned to macOS.", Ctl::Slider(|s| &mut s.mem, 2, mem, "GB")),
+                row("Disk usage", "Images, containers and volumes, on a disk image that grows as needed.", Ctl::Text(disk)),
+            ]
+        }
+        Pane::Network => vec![
+            row("Published ports", "A container port you publish answers on localhost on this Mac.", Ctl::Text("localhost".into())),
+            row("Docker endpoint", "Point any Docker client here, or use the patina context.", Ctl::Text(short(crate::engine::paths::docker_sock()))),
+        ],
+        Pane::Engine => vec![
+            row("Run Intel images with Rosetta", "Used for linux/amd64 images on Apple silicon.", Ctl::Cfg("rosetta", true)),
+            row("Docker Engine", "Version reported by the engine.", Ctl::Text(or(&i.version, "—"))),
+            row("Linux", "The engine's guest system, in its own VM.", Ctl::Text(or(&i.runtime, "—"))),
+        ],
+        Pane::About => vec![
+            row("Version", "Patina for Apple silicon.", Ctl::Text(env!("CARGO_PKG_VERSION").into())),
+            row("Command line", "Add this folder to your PATH to use docker and docker-compose.", Ctl::Text(short(crate::engine::paths::bin()))),
+            row("Data", "The disk image, logs and settings.", Ctl::Text(short(crate::engine::paths::root()))),
         ],
     }
 }
@@ -71,8 +115,7 @@ fn rows(pane: Pane, upd: Upd) -> Vec<RowDef> {
 pub fn show(ui: &mut Ui, cx: &mut Cx) {
     let wd = ui.available_width().min(700.0);
     let origin = ui.cursor().min;
-    let pane = cx.s.pane;
-    let defs = rows(pane, cx.s.upd);
+    let defs = rows(cx.s);
     let (a, dy) = swap(cx.tw, cx.s.tab_at, 0.35);
 
     // Measure rows first so the card can be painted behind them.
@@ -81,7 +124,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
     for d in &defs {
         let hint = w::g_wrap(ui, &d.hint, sans(12.5), MUTED, label_w.max(200.0), 17.5);
         let mut h = 32.0 + 19.0 + 2.0 + hint.size().y;
-        if let Ctl::Code(code) = d.ctl {
+        if let Ctl::Code(code) = &d.ctl {
             let cg = w::g_wrap(ui, code, mono(12.0), CODE, wd - 40.0 - 32.0, 20.4);
             h += 4.0 + 8.0 + cg.size().y + 28.0;
         }
@@ -120,6 +163,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
                         let v = get(&mut s.set);
                         *v = !*v;
                     }));
+                }
+            }
+            Ctl::Cfg(key, restart) => {
+                let on = cx.s.cfg_on(key);
+                let r = Rect::from_min_size(pos2(right - 40.0, cy - 12.0), vec2(40.0, 24.0));
+                if w::switch(&mut sui, cx.tw, r, id, on, if on { VERDIGRIS } else { SWITCH_OFF }).clicked() {
+                    let (key, restart) = (*key, *restart);
+                    cx.fx.push(Box::new(move |s| s.set_cfg(key, !on, restart)));
                 }
             }
             Ctl::Slider(get, min, max, unit) => {

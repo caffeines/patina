@@ -1,11 +1,14 @@
 //! Patina: containers and Linux machines for your Mac.
 //!
 //! A native Rust desktop app (egui/eframe) built from the Patina design.
-//! The engine is simulated; see `sim.rs`.
+//! Patina runs its own engine: Docker Engine in a Linux VM it boots with
+//! Apple's Virtualization framework (see `engine/`). `--demo` runs the
+//! simulated engine from the design instead.
 
 mod app;
 mod engine;
 mod icons;
+mod live;
 mod onboarding;
 mod sim;
 mod theme;
@@ -24,16 +27,22 @@ USAGE:
     patina [OPTIONS]
 
 OPTIONS:
+    --demo              use the simulated engine from the design instead of real Docker
+    --onboarding        show the first-run flow (also shown automatically on first launch)
+    --step <1-4>        start the first-run flow on this step
+    --screenshot <png>  save a screenshot of the window and quit (with --wait <seconds>);
+                        the window ignores all input while it waits
+    --write-icon <png>  write the 1024px app icon and quit
+    -h, --help          print this help
+
+VIEW OPTIONS:
     --view <name>       containers | images | volumes | networks | machines | kubernetes | settings
     --pane <name>       general | resources | network | engine | about   (with --view settings)
+
+DEMO OPTIONS (imply --demo):
     --scenario <name>   default | empty | loading | stopped | failed | trouble | update | diskfull | offline
     --show <name>       run | menu | delete | toast | palette | pull | blocked | prune | volume | machine
     --phase <name>      invalid | conflict | busy | nomatch | on | dirty
-    --onboarding        show the first-run flow (also shown automatically on first launch)
-    --step <1-4>        start the first-run flow on this step
-    --screenshot <png>  save a screenshot of the window and quit (with --wait <seconds>)
-    --write-icon <png>  write the 1024px app icon and quit
-    -h, --help          print this help
 ";
 
 fn parse_args() -> Args {
@@ -42,6 +51,7 @@ fn parse_args() -> Args {
     while let Some(flag) = it.next() {
         let mut val = || it.next().unwrap_or_default();
         match flag.as_str() {
+            "--demo" => a.demo = true,
             "--view" => a.preset.view = val(),
             "--pane" => a.preset.pane = val(),
             "--scenario" => a.preset.scenario = val(),
@@ -71,6 +81,10 @@ fn parse_args() -> Args {
                 std::process::exit(2);
             }
         }
+    }
+    let p = &a.preset;
+    if !(p.scenario.is_empty() && p.show.is_empty() && p.phase.is_empty()) {
+        a.demo = true;
     }
     a
 }
@@ -162,7 +176,8 @@ fn main() -> eframe::Result {
         std::process::exit(engine_cli(&argv[2..]));
     }
     let args = parse_args();
-    let show_onboarding = args.onboarding || (args.screenshot.is_none() && !app::is_onboarded() && args.preset.show.is_empty());
+    let first_run = if args.demo { !app::is_onboarded() } else { !engine::setup::installed() };
+    let show_onboarding = args.onboarding || (args.screenshot.is_none() && first_run && args.preset.show.is_empty());
     let (size, min, resizable) = if show_onboarding {
         (app::ONB_SIZE, app::ONB_SIZE, false)
     } else {

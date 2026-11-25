@@ -1,9 +1,17 @@
-//! First run: welcome, setup, bring your work over from Docker Desktop, ready.
+//! First run: welcome, setup, ready.
+//!
+//! With the real engine, setup does the work: it installs the `docker`
+//! command, builds the VM disk from Debian's cloud image, and starts the
+//! engine, reporting progress as it goes. In `--demo` mode it plays the
+//! design's simulated flow, including "Bring your work".
 
 use std::f32::consts::PI;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use egui::{pos2, vec2, Align2, Context, Frame, Id, Rect, Sense, Stroke, UiBuilder, ViewportCommand};
 
+use crate::engine::{control, setup as engine_setup};
 use crate::sim::St;
 use crate::theme::*;
 use crate::tween::{rise, Ease, Tweens};
@@ -18,6 +26,75 @@ pub enum Mig {
 
 type OJob = Box<dyn FnOnce(&mut Onb)>;
 
+enum SetupMsg {
+    Start(usize),
+    Note(usize, String),
+    Done(usize),
+    Fail(usize, String),
+}
+
+struct Reporter {
+    tx: mpsc::Sender<SetupMsg>,
+    ctx: egui::Context,
+}
+
+impl Reporter {
+    fn send(&self, m: SetupMsg) {
+        let _ = self.tx.send(m);
+        self.ctx.request_repaint();
+    }
+    fn progress(&self, i: usize, f: f64, note: &str) {
+        let text = if (0.0..1.0).contains(&f) { format!("{:.0}%  {note}", f * 100.0) } else { note.to_string() };
+        self.send(SetupMsg::Note(i, text));
+    }
+}
+
+/// Install the command line tools, build the disk, start the engine.
+fn spawn_setup(ctx: egui::Context) -> mpsc::Receiver<SetupMsg> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let r = Reporter { tx, ctx };
+        r.send(SetupMsg::Start(0));
+        if let Err(e) = engine_setup::install_cli(&|f, n| r.progress(0, f, n)) {
+            r.send(SetupMsg::Fail(0, e));
+            return;
+        }
+        r.send(SetupMsg::Done(0));
+        r.send(SetupMsg::Start(1));
+        if let Err(e) = engine_setup::create_disk(&|f, n| r.progress(1, f, n)) {
+            r.send(SetupMsg::Fail(1, e));
+            return;
+        }
+        r.send(SetupMsg::Done(1));
+        r.send(SetupMsg::Start(2));
+        if let Err(e) = control::start() {
+            r.send(SetupMsg::Fail(2, e));
+            return;
+        }
+        for _ in 0..1800 {
+            match control::status() {
+                Some(s) if s.state == "running" => {
+                    r.send(SetupMsg::Done(2));
+                    return;
+                }
+                Some(s) if s.state == "error" => {
+                    r.send(SetupMsg::Fail(2, s.message));
+                    return;
+                }
+                Some(s) => r.send(SetupMsg::Note(2, s.message)),
+                None => {
+                    let tail = control::log_tail(2);
+                    r.send(SetupMsg::Fail(2, if tail.is_empty() { "The engine stopped.".into() } else { tail }));
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        r.send(SetupMsg::Fail(2, "The engine is taking too long to start.".into()));
+    });
+    rx
+}
+
 pub struct Onb {
     pub step: usize,
     step_at: f64,
@@ -31,13 +108,23 @@ pub struct Onb {
     timers: Vec<(f64, u64, OJob)>,
     seq: u64,
     pub finished: bool,
+    /// Set up the real engine instead of playing the simulation.
+    live: bool,
+    ctx: Option<egui::Context>,
+    rx: Option<mpsc::Receiver<SetupMsg>>,
+    notes: [String; 3],
+    failed: Option<String>,
 }
 
 const COMMAND: &str = "docker run --rm hello-world";
+const LIVE_COMMAND: &str = "export PATH=\"$HOME/.patina/bin:$PATH\" && docker context use patina";
 
 impl Onb {
-    pub fn new(now: f64, step: usize) -> Onb {
-        let step = step.clamp(1, 4);
+    pub fn new(now: f64, step: usize, live: bool, ctx: Option<egui::Context>) -> Onb {
+        let mut step = step.clamp(1, 4);
+        if live && step == 3 {
+            step = 2;
+        }
         let mut o = Onb {
             step,
             step_at: now,
@@ -55,6 +142,11 @@ impl Onb {
             timers: Vec::new(),
             seq: 0,
             finished: false,
+            live,
+            ctx,
+            rx: None,
+            notes: Default::default(),
+            failed: None,
         };
         if step == 2 {
             o.run_setup();
@@ -67,12 +159,36 @@ impl Onb {
         self.timers.push((self.time + ms as f64 / 1000.0, self.seq, Box::new(f)));
     }
 
+    fn on_msg(&mut self, m: SetupMsg) {
+        match m {
+            SetupMsg::Start(i) => {
+                self.setup[i] = 1;
+                self.notes[i].clear();
+            }
+            SetupMsg::Note(i, n) => self.notes[i] = n,
+            SetupMsg::Done(i) => {
+                self.setup[i] = 2;
+                self.setup_at[i] = self.time;
+                self.notes[i] = "done".into();
+            }
+            SetupMsg::Fail(i, e) => {
+                self.setup[i] = 3;
+                self.notes[i] = "failed".into();
+                self.failed = Some(e);
+            }
+        }
+    }
+
     pub fn next_due(&self) -> Option<f64> {
         self.timers.iter().map(|t| t.0).reduce(f64::min)
     }
 
     pub fn tick(&mut self, now: f64) {
         self.time = now;
+        let msgs: Vec<SetupMsg> = self.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for m in msgs {
+            self.on_msg(m);
+        }
         let mut due = Vec::new();
         let mut i = 0;
         while i < self.timers.len() {
@@ -98,6 +214,15 @@ impl Onb {
 
     fn run_setup(&mut self) {
         if self.setup[2] == 2 {
+            return;
+        }
+        if self.live {
+            self.failed = None;
+            self.setup = [0, 0, 0];
+            self.notes = Default::default();
+            if let Some(ctx) = self.ctx.clone() {
+                self.rx = Some(spawn_setup(ctx));
+            }
             return;
         }
         self.setup = [1, 0, 0];
@@ -175,9 +300,14 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         w::pie(&ip, c, 60.0, -PI / 4.0, frac * std::f32::consts::TAU, VERDIGRIS);
 
         let mut y = ill_top + 220.0 + 26.0;
-        for (i, label) in ["Welcome", "Set up", "Bring your work", "Ready"].into_iter().enumerate() {
-            let past = i + 1 < o.step || o.step == 4;
-            let cur = i + 1 == o.step && o.step != 4;
+        let labels: &[(&str, usize)] = if o.live {
+            &[("Welcome", 1), ("Set up", 2), ("Ready", 4)]
+        } else {
+            &[("Welcome", 1), ("Set up", 2), ("Bring your work", 3), ("Ready", 4)]
+        };
+        for (i, &(label, n)) in labels.iter().enumerate() {
+            let past = n < o.step || o.step == 4;
+            let cur = n == o.step && o.step != 4;
             let col = tw.c(("onb-step", i), if past || cur { TEXT } else { MUTED }, 0.4);
             let dc = pos2(aside.left() + 24.0 + 5.0, y + 10.0);
             if cur {
@@ -211,7 +341,17 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         let mut mui = ui.new_child(UiBuilder::new().max_rect(main));
         mui.multiply_opacity(sa);
         let mp = mui.painter().clone();
-        let text = [
+        let live_text = [
+            (
+                "Welcome",
+                "Containers for your Mac",
+                "Patina runs Docker Engine in its own small Linux virtual machine, with no other apps needed. Setup downloads Debian and the docker command, then starts the engine.",
+            ),
+            ("Step 2 of 3", "Setting things up", "This runs once and takes a few minutes. Patina downloads about 400 MB."),
+            ("", "", ""),
+            ("Step 3 of 3", "Patina is ready", "Docker Engine is running in Patina's own VM. Put Patina's tools on your PATH, then use docker as usual."),
+        ];
+        let text = if o.live { live_text[o.step - 1] } else { [
             (
                 "Welcome",
                 "Containers and Linux machines for your Mac",
@@ -224,7 +364,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 "Docker Desktop is installed on this Mac. Patina can copy its containers, images and volumes, so you pick up where you left off.",
             ),
             ("Step 4 of 4", "Patina is ready", "The docker command now talks to Patina. Try it in a terminal."),
-        ][o.step - 1];
+        ][o.step - 1] };
         let mut y = main.top() + sdy;
         let kg = w::g_ls(&mui, text.0, sans(12.0), MUTED, 0.72);
         w::put(&mp, &kg, pos2(main.left(), y), Align2::LEFT_TOP);
@@ -266,18 +406,30 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                         1 => {
                             w::status_dot(&mp, tw, Id::new(("onb-task", i)), dc, St::Starting, false, -10.0);
                         }
+                        3 => {
+                            mp.circle_filled(dc, 5.0, DANGER);
+                        }
                         _ => {
                             mp.circle_stroke(dc, 4.25, Stroke::new(1.5_f32, DIM));
                         }
                     }
                     let col = tw.c(("onb-task-c", i), if v > 0 { TEXT } else { MUTED }, 0.4);
                     w::text(&mp, &mui, dc.x + 5.0 + 16.0, cy, label, sans(14.0), col);
-                    let note = match v {
-                        2 => "done",
-                        1 => "working",
-                        _ => "",
+                    let note = if o.live {
+                        o.notes[i].as_str()
+                    } else {
+                        match v {
+                            2 => "done",
+                            1 => "working",
+                            _ => "",
+                        }
                     };
-                    w::text_right(&mp, &mui, card.right() - 20.0, cy, note, sans(12.5), MUTED);
+                    let ng = w::g_elide(&mui, note, sans(12.5), if v == 3 { DANGER_TEXT } else { MUTED }, 260.0);
+                    w::put(&mp, &ng, pos2(card.right() - 20.0, cy), Align2::RIGHT_CENTER);
+                }
+                if let Some(err) = &o.failed {
+                    let eg = w::g_wrap(&mui, err, sans(12.5), DANGER_TEXT, main.width(), 17.5);
+                    mp.galley(pos2(main.left(), card.bottom() + 16.0), eg, DANGER_TEXT);
                 }
             }
             3 => {
@@ -308,7 +460,9 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 w::card(&mp, r, 12.0, TERM, CARD_EDGE);
                 let cy = r.center().y;
                 let d = w::text(&mp, &mui, r.left() + 18.0, cy, "$", mono(13.0), VERDIGRIS);
-                let cmd = w::text(&mp, &mui, d.right() + 8.0, cy, COMMAND, mono(13.0), TEXT);
+                let command = if o.live { LIVE_COMMAND } else { COMMAND };
+                let cg = w::g_elide(&mui, command, mono(13.0), TEXT, r.width() - 18.0 - 20.0 - 8.0 - 90.0);
+                let cmd = w::put(&mp, &cg, pos2(d.right() + 8.0, cy), Align2::LEFT_CENTER);
                 w::cursor_block(&mp, Rect::from_min_size(pos2(cmd.right() + 8.0, cy - 7.5), vec2(7.0, 15.0)), now);
                 let copied = now - o.copied_at < 1.6;
                 if copied {
@@ -316,7 +470,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
                 }
                 let (resp, _) = Btn::ghost(if copied { "Copied" } else { "Copy" }).h(30.0).pad(12.0).radius(8.0).at_right(&mut mui, r.right() - 8.0, cy, Id::new("onb-copy"));
                 if resp.clicked() {
-                    ctx.copy_text(COMMAND.to_string());
+                    ctx.copy_text(command.to_string());
                     next = Some(Box::new(|o: &mut Onb| o.copied_at = o.time));
                 }
             }
@@ -329,27 +483,34 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         if o.step > 1 {
             let (r, _) = Btn::ghost("Back").h(36.0).radius(10.0).at_left(&mut fui, main.left(), fy, Id::new("onb-back"));
             if r.clicked() {
-                let s = o.step - 1;
+                let s = if o.live && o.step == 4 { 2 } else { o.step - 1 };
                 next = Some(Box::new(move |o: &mut Onb| o.go_step(s)));
             }
         }
         let mut right = main.right();
         if o.step < 4 {
+            let failed = o.step == 2 && o.failed.is_some();
             let label = match (o.step, o.mig) {
+                _ if failed => "Try again",
                 (1, _) => "Get started",
                 (3, Mig::Done) => "Continue",
                 (3, Mig::Busy) => "Importing",
                 (3, Mig::Idle) => "Import",
                 _ => "Continue",
             };
-            let off = (o.step == 2 && done < 3.0) || (o.step == 3 && o.mig == Mig::Busy);
+            let off = !failed && ((o.step == 2 && done < 3.0) || (o.step == 3 && o.mig == Mig::Busy));
             let (r, rr) = Btn::cta(label).h(36.0).pad(18.0).radius(10.0).sheen(true).enabled(!off).at_right(&mut fui, right, fy, Id::new("onb-next"));
             if r.clicked() {
                 let step = o.step;
                 let mig = o.mig;
+                let live = o.live;
                 next = Some(Box::new(move |o: &mut Onb| {
-                    if step == 3 && mig == Mig::Idle {
+                    if failed {
+                        o.run_setup()
+                    } else if step == 3 && mig == Mig::Idle {
                         o.start_import()
+                    } else if live && step == 2 {
+                        o.go_step(4)
                     } else {
                         o.go_step(step + 1)
                     }

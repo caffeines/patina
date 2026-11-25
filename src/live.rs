@@ -367,7 +367,7 @@ async fn build_log(out: Out, page: Page, id: String) {
     }
 }
 
-const NO_BUILDX: &str = "Patina reads build history through docker buildx, and it isn't installed. Add the buildx plugin, then refresh.";
+const NO_BUILDX: &str = "Patina reads build history through docker buildx, which it couldn't find. Patina installs it when it starts; check your connection, reopen Patina, then refresh.";
 
 /// Run `docker buildx …` against Patina's engine with its current builder.
 async fn buildx(args: &[&str]) -> Result<String, String> {
@@ -578,10 +578,13 @@ async fn worker(mut rx: tmpsc::UnboundedReceiver<Cmd>, out: Out) {
         page_task: None,
         last_down: None,
     };
-    // Existing installs from before PATH integration get it now (if enabled).
+    // Existing installs from before PATH integration or buildx get them now.
     let _ = blocking(|| {
         if engine::setup::installed() && config::load().shell_path && !integrate::shell_installed() {
             let _ = integrate::install_shell();
+        }
+        if engine::setup::installed() {
+            let _ = engine::setup::install_plugins(&|_, _| {});
         }
     })
     .await;

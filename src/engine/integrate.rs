@@ -7,6 +7,10 @@
 //! - **PATH.** `~/.patina/shell/init.{zsh,bash,fish}` put `~/.patina/bin`
 //!   first on PATH, and one marked line in the shell profile sources it. The
 //!   line is removed again when the setting is turned off.
+//! - **Plugins.** When the docker command can't find `compose` and `buildx`
+//!   as plugins on its own, `~/.patina/bin` is added to
+//!   `cliPluginsExtraDirs` in `~/.docker/config.json`, the way Docker
+//!   Desktop adds its app's plugin folder.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,6 +65,51 @@ pub fn release_context() -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Make `docker compose` and `docker buildx` work with Patina's docker.
+pub fn ensure_plugins() -> Result<(), String> {
+    if ["compose", "buildx"].iter().all(|p| docker(&[p, "version"]).is_ok()) {
+        return Ok(());
+    }
+    let dir = std::env::var_os("DOCKER_CONFIG").map(PathBuf::from).unwrap_or_else(|| paths::home().join(".docker"));
+    add_plugin_dir(&dir.join("config.json"), &paths::bin())
+}
+
+/// Add `dir` to `cliPluginsExtraDirs` in a docker config file, keeping
+/// everything else in it.
+fn add_plugin_dir(config: &Path, dir: &Path) -> Result<(), String> {
+    let mut cfg: serde_json::Value = match fs::read_to_string(config) {
+        Ok(t) if !t.trim().is_empty() => serde_json::from_str(&t).map_err(|e| format!("{} isn't valid JSON: {e}", config.display()))?,
+        Ok(_) => serde_json::json!({}),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e.to_string()),
+    };
+    let dir = dir.to_string_lossy().into_owned();
+    let list = cfg
+        .as_object_mut()
+        .ok_or("The docker config isn't a JSON object.")?
+        .entry("cliPluginsExtraDirs")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("cliPluginsExtraDirs in the docker config isn't a list.")?;
+    if list.iter().any(|d| d.as_str() == Some(dir.as_str())) {
+        return Ok(());
+    }
+    list.push(dir.into());
+    // Tab-indented, as the docker command writes it; private, as it may hold credentials.
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b"\t"));
+    serde::Serialize::serialize(&cfg, &mut ser).map_err(|e| e.to_string())?;
+    out.push(b'\n');
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = config.with_extension("json.patina");
+    fs::write(&tmp, out).map_err(|e| e.to_string())?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    fs::rename(&tmp, config).map_err(|e| e.to_string())
 }
 
 fn shell_dir() -> PathBuf {
@@ -186,6 +235,26 @@ pub fn remove_shell() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_the_plugin_dir_once_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("patina-test-{}", std::process::id()));
+        let config = dir.join("config.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&config, "{\n\t\"auths\": {\"ghcr.io\": {}},\n\t\"currentContext\": \"patina\"\n}").unwrap();
+        let bin = Path::new("/Users/someone/.patina/bin");
+        add_plugin_dir(&config, bin).unwrap();
+        add_plugin_dir(&config, bin).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(v["cliPluginsExtraDirs"], serde_json::json!(["/Users/someone/.patina/bin"]));
+        assert_eq!(v["currentContext"], "patina");
+        assert!(v["auths"]["ghcr.io"].is_object());
+        // A missing file gets created.
+        let fresh = dir.join("new/config.json");
+        add_plugin_dir(&fresh, bin).unwrap();
+        assert!(fs::read_to_string(&fresh).unwrap().contains("cliPluginsExtraDirs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn profile_lines_are_added_once_and_removed_cleanly() {

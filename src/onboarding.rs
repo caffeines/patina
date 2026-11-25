@@ -495,7 +495,7 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
             2 => {
                 let card = Rect::from_min_size(pos2(main.left(), y), vec2(main.width(), 52.0 * 3.0));
                 w::card(&mp, card, 14.0, CARD, CARD_EDGE);
-                for (i, label) in ["Install the docker and compose commands", "Create the disk image", "Start the engine"].into_iter().enumerate() {
+                for (i, label) in ["Install docker, compose and buildx", "Create the disk image", "Start the engine"].into_iter().enumerate() {
                     let top = card.top() + i as f32 * 52.0;
                     if i > 0 {
                         mp.line_segment([pos2(card.left(), top + 0.5), pos2(card.right(), top + 0.5)], Stroke::new(1.0_f32, HAIRLINE));

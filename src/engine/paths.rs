@@ -69,6 +69,9 @@ pub fn docker_cli() -> PathBuf {
 pub fn compose_cli() -> PathBuf {
     bin().join("docker-compose")
 }
+pub fn buildx_cli() -> PathBuf {
+    bin().join("docker-buildx")
+}
 
 pub fn ensure() {
     for d in [run(), vm(), cache(), bin(), logs()] {

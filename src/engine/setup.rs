@@ -139,14 +139,20 @@ fn latest_docker(index: &str) -> Option<String> {
     best.map(|(_, v)| v)
 }
 
-/// The first run of digits: "Docker version 28.5.2, build …" is 28, "v2.39.1" is 2.
-fn major(version: &str) -> Option<u32> {
-    version.split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())?.parse().ok()
+/// The first version number in a tool's output, as (major, minor):
+/// "Docker version 28.5.2, build …" is (28, 5), "github.com/docker/buildx v0.37.2 …" is (0, 37).
+fn version(text: &str) -> Option<(u32, u32)> {
+    let at = text.find(|c: char| c.is_ascii_digit())?;
+    let mut parts = text[at..].split('.').map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    Some((major, minor))
 }
 
-/// A working `docker` (20+) or `docker-compose` (v2) already on this Mac:
-/// Docker Desktop's, Homebrew's (where Colima users get theirs), OrbStack's,
-/// or one on PATH. Never Patina's own.
+/// A working `docker` (20+), `docker-compose` (v2) or `docker-buildx`
+/// (0.23+, which has `history`) already on this Mac: Docker Desktop's,
+/// Homebrew's (where Colima users get theirs), OrbStack's, or one on PATH.
+/// Never Patina's own.
 fn existing_tool(name: &str) -> Option<PathBuf> {
     let home = paths::home();
     let mut dirs: Vec<PathBuf> = vec![
@@ -156,7 +162,7 @@ fn existing_tool(name: &str) -> Option<PathBuf> {
         "/usr/local/bin".into(),
         home.join(".orbstack/bin"),
     ];
-    if name == "docker-compose" {
+    if name != "docker" {
         dirs.extend([
             "/Applications/Docker.app/Contents/Resources/cli-plugins".into(),
             home.join(".docker/cli-plugins"),
@@ -176,8 +182,41 @@ fn existing_tool(name: &str) -> Option<PathBuf> {
 }
 
 fn tool_works(path: &Path, name: &str) -> bool {
-    let (args, min): (&[&str], u32) = if name == "docker" { (&["--version"], 20) } else { (&["version", "--short"], 2) };
-    Command::new(path).args(args).output().is_ok_and(|o| o.status.success() && major(&String::from_utf8_lossy(&o.stdout)).is_some_and(|v| v >= min))
+    let (args, min): (&[&str], (u32, u32)) = match name {
+        "docker" => (&["--version"], (20, 0)),
+        "docker-buildx" => (&["version"], (0, 23)),
+        _ => (&["version", "--short"], (2, 0)),
+    };
+    Command::new(path).args(args).output().is_ok_and(|o| o.status.success() && version(&String::from_utf8_lossy(&o.stdout)).is_some_and(|v| v >= min))
+}
+
+/// The newest release tag of a GitHub repository, from where
+/// `/releases/latest` redirects to.
+fn latest_release(repo: &str) -> Result<String, String> {
+    let resp = agent().head(&format!("https://github.com/{repo}/releases/latest")).call().map_err(|e| format!("Couldn't reach GitHub: {e}"))?;
+    let url = resp.get_url().to_string();
+    url.rsplit('/').next().filter(|t| t.starts_with('v')).map(str::to_string).ok_or_else(|| format!("Couldn't find the latest release of {repo}."))
+}
+
+/// `docker-compose` and `docker-buildx` in `~/.patina/bin`, copied from
+/// another install when there's a working one, else downloaded, and made
+/// findable as `docker compose` and `docker buildx`.
+pub fn install_plugins(report: Report) -> Result<(), String> {
+    paths::ensure();
+    if !paths::compose_cli().exists() && !copy_existing("docker-compose", &paths::compose_cli(), report) {
+        let url = format!("https://github.com/docker/compose/releases/latest/download/docker-compose-darwin-{}", arch());
+        download(&url, &paths::compose_cli(), report, "docker compose")?;
+        make_executable(&paths::compose_cli());
+    }
+    if !paths::buildx_cli().exists() && !copy_existing("docker-buildx", &paths::buildx_cli(), report) {
+        report(-1.0, "Finding the latest docker buildx");
+        let v = latest_release("docker/buildx")?;
+        let goarch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+        let url = format!("https://github.com/docker/buildx/releases/download/{v}/buildx-{v}.darwin-{goarch}");
+        download(&url, &paths::buildx_cli(), report, "docker buildx")?;
+        make_executable(&paths::buildx_cli());
+    }
+    super::integrate::ensure_plugins()
 }
 
 /// Copy `name` from another install into `dest`. False if there's none to copy.
@@ -210,10 +249,11 @@ fn copy_existing(name: &str, dest: &Path, report: Report) -> bool {
     true
 }
 
-/// Install `docker` and `docker-compose` into `~/.patina/bin`, add the
-/// `patina` docker context, and put `~/.patina/bin` on PATH (if enabled).
-/// The context becomes current when the engine starts. Each tool is copied
-/// from an existing install when there's a working one, else downloaded.
+/// Install `docker`, `docker-compose` and `docker-buildx` into
+/// `~/.patina/bin`, add the `patina` docker context, and put `~/.patina/bin`
+/// on PATH (if enabled). The context becomes current when the engine
+/// starts. Each tool is copied from an existing install when there's a
+/// working one, else downloaded.
 pub fn install_cli(report: Report) -> Result<(), String> {
     paths::ensure();
     if !paths::docker_cli().exists() && !copy_existing("docker", &paths::docker_cli(), report) {
@@ -231,11 +271,7 @@ pub fn install_cli(report: Report) -> Result<(), String> {
         let _ = fs::remove_dir_all(&tmp);
         let _ = fs::remove_file(&tgz);
     }
-    if !paths::compose_cli().exists() && !copy_existing("docker-compose", &paths::compose_cli(), report) {
-        let url = format!("https://github.com/docker/compose/releases/latest/download/docker-compose-darwin-{}", arch());
-        download(&url, &paths::compose_cli(), report, "docker compose")?;
-        make_executable(&paths::compose_cli());
-    }
+    install_plugins(report)?;
     report(1.0, "done");
     super::integrate::ensure_context()?;
     let cfg = config::load();
@@ -414,11 +450,13 @@ mod tests {
 
     #[test]
     fn reads_tool_versions() {
-        assert_eq!(major("Docker version 28.5.2, build ecc6942"), Some(28));
-        assert_eq!(major("2.39.1\n"), Some(2));
-        assert_eq!(major("v2.40.3"), Some(2));
-        assert_eq!(major("docker-compose version 1.29.2, build 5becea4c"), Some(1));
-        assert_eq!(major("nope"), None);
+        assert_eq!(version("Docker version 28.5.2, build ecc6942"), Some((28, 5)));
+        assert_eq!(version("2.39.1\n"), Some((2, 39)));
+        assert_eq!(version("v2.40.3"), Some((2, 40)));
+        assert_eq!(version("docker-compose version 1.29.2, build 5becea4c"), Some((1, 29)));
+        assert_eq!(version("github.com/docker/buildx v0.37.2 2d379c0c3f22"), Some((0, 37)));
+        assert!(version("github.com/docker/buildx v0.12.1 630066b").unwrap() < (0, 23));
+        assert_eq!(version("nope"), None);
     }
 
     #[test]

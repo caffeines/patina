@@ -111,7 +111,7 @@ fn engine_cli(args: &[String]) -> i32 {
         #[cfg(target_os = "macos")]
         Some("run") => engine::daemon::run(),
         Some("setup") => {
-            eprintln!("Installing the docker and compose commands");
+            eprintln!("Installing docker, compose and buildx");
             if let Err(e) = setup::install_cli(&report) {
                 eprintln!("\n{e}");
                 return 1;

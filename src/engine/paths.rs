@@ -69,6 +69,10 @@ pub fn docker_cli() -> PathBuf {
 pub fn compose_cli() -> PathBuf {
     bin().join("docker-compose")
 }
+/// The cluster's credentials as JSON, written by the guest's kubectl.
+pub fn kube_creds() -> PathBuf {
+    root().join("kube.json")
+}
 pub fn buildx_cli() -> PathBuf {
     bin().join("docker-buildx")
 }

@@ -149,6 +149,40 @@ pub struct BuildInfo {
     pub err: String,
 }
 
+/// The Kubernetes browser's tabs, and the kinds each one lists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KTab {
+    Pods,
+    Workloads,
+    Services,
+    Storage,
+    Config,
+}
+
+impl KTab {
+    pub const ALL: [KTab; 5] = [KTab::Pods, KTab::Workloads, KTab::Services, KTab::Storage, KTab::Config];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KTab::Pods => "Pods",
+            KTab::Workloads => "Workloads",
+            KTab::Services => "Services",
+            KTab::Storage => "Storage",
+            KTab::Config => "Config",
+        }
+    }
+
+    pub fn holds(self, kind: &str) -> bool {
+        match self {
+            KTab::Pods => kind == "Pod",
+            KTab::Workloads => matches!(kind, "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob"),
+            KTab::Services => matches!(kind, "Service" | "Ingress"),
+            KTab::Storage => matches!(kind, "PersistentVolumeClaim" | "PersistentVolume"),
+            KTab::Config => matches!(kind, "ConfigMap" | "Secret"),
+        }
+    }
+}
+
 /// The full-window log page: a container's logs or a build's log.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -198,6 +232,8 @@ pub enum Ov {
 pub enum Banner {
     Update,
     Disk,
+    /// The engine runs an older build than the app.
+    Stale,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -456,6 +492,58 @@ pub fn fmt_count(v: usize, word: &str) -> String {
     format!("{} {}{}", v, word, if v == 1 { "" } else { "s" })
 }
 
+/// A small cluster for the demo: a shop app next to the system pods.
+fn demo_kube() -> crate::engine::kube::Snapshot {
+    use crate::engine::kube::{Health as H, Node, Obj, Snapshot};
+    let now = chrono::Utc::now().timestamp();
+    let o = |kind: &'static str, ns: &str, name: &str, health: H, cols: &[&str], ago: i64| Obj {
+        kind,
+        ns: ns.into(),
+        name: name.into(),
+        health,
+        cols: cols.iter().map(|c| c.to_string()).collect(),
+        created: now - ago,
+    };
+    let h = 3600;
+    let objs = vec![
+        o("Pod", "shop", "web-7c9f6d8b5-x2kqp", H::Good, &["1/1", "Running", "0", "4m", "92Mi"], 2 * h),
+        o("Pod", "shop", "web-7c9f6d8b5-m8tzl", H::Good, &["1/1", "Running", "0", "3m", "88Mi"], 2 * h),
+        o("Pod", "shop", "api-5b7d9c6f4-q9wnd", H::Bad, &["0/1", "CrashLoopBackOff", "6", "—", "—"], 40 * 60),
+        o("Pod", "shop", "postgres-0", H::Good, &["1/1", "Running", "0", "11m", "214Mi"], 26 * h),
+        o("Pod", "shop", "migrate-29k4f", H::Idle, &["0/1", "Completed", "0", "—", "—"], 26 * h),
+        o("Pod", "kube-system", "coredns-ccb96694c-7rlp2", H::Good, &["1/1", "Running", "0", "3m", "21Mi"], 3 * 86_400),
+        o("Pod", "kube-system", "local-path-provisioner-5cf85fd84d-9gq7b", H::Good, &["1/1", "Running", "0", "1m", "12Mi"], 3 * 86_400),
+        o("Pod", "kube-system", "metrics-server-5985cbc9d7-vdmfs", H::Good, &["1/1", "Running", "0", "9m", "28Mi"], 3 * 86_400),
+        o("Deployment", "shop", "web", H::Good, &["Deployment", "2/2"], 2 * h),
+        o("Deployment", "shop", "api", H::Busy, &["Deployment", "0/1"], 40 * 60),
+        o("StatefulSet", "shop", "postgres", H::Good, &["StatefulSet", "1/1"], 26 * h),
+        o("Job", "shop", "migrate", H::Idle, &["Job", "1/1"], 26 * h),
+        o("CronJob", "shop", "nightly-report", H::Good, &["CronJob", "0 3 * * *"], 26 * h),
+        o("Deployment", "kube-system", "coredns", H::Good, &["Deployment", "1/1"], 3 * 86_400),
+        o("Deployment", "kube-system", "local-path-provisioner", H::Good, &["Deployment", "1/1"], 3 * 86_400),
+        o("Deployment", "kube-system", "metrics-server", H::Good, &["Deployment", "1/1"], 3 * 86_400),
+        o("Service", "shop", "web", H::Good, &["NodePort", "10.43.112.40", "80:30080/TCP"], 2 * h),
+        o("Service", "shop", "api", H::Good, &["ClusterIP", "10.43.87.15", "8080/TCP"], 2 * h),
+        o("Service", "shop", "postgres", H::Good, &["ClusterIP", "None", "5432/TCP"], 26 * h),
+        o("Service", "default", "kubernetes", H::Good, &["ClusterIP", "10.43.0.1", "443/TCP"], 3 * 86_400),
+        o("Service", "kube-system", "kube-dns", H::Good, &["ClusterIP", "10.43.0.10", "53/UDP,53/TCP,9153/TCP"], 3 * 86_400),
+        o("Service", "kube-system", "metrics-server", H::Good, &["ClusterIP", "10.43.204.71", "443/TCP"], 3 * 86_400),
+        o("PersistentVolumeClaim", "shop", "data-postgres-0", H::Good, &["PVC", "Bound", "5Gi", "local-path"], 26 * h),
+        o("PersistentVolume", "", "pvc-3f1c9a2e-7d4b-4e10-9a3c-5b8d2f6e1a07", H::Good, &["PV", "Bound", "5Gi", "local-path"], 26 * h),
+        o("ConfigMap", "shop", "web-config", H::Good, &["ConfigMap", "3"], 2 * h),
+        o("Secret", "shop", "postgres-credentials", H::Good, &["Secret", "2 · Opaque"], 26 * h),
+        o("ConfigMap", "kube-system", "coredns", H::Good, &["ConfigMap", "2"], 3 * 86_400),
+    ];
+    let node = Node {
+        version: "v1.33.5+k3s1".into(),
+        cpu_m: Some(212.0),
+        cpu_cap_m: 4000.0,
+        mem: Some(1.31 * 1024f64.powi(3)),
+        mem_cap: 3.8 * 1024f64.powi(3),
+    };
+    Snapshot { objs, node: Some(node) }
+}
+
 /// A build log in `--progress plain` form, for the demo.
 fn demo_build_log(failed: bool) -> Vec<LogLine> {
     let mut out = vec![
@@ -620,6 +708,12 @@ pub struct State {
     pub pods: Vec<Pod>,
     pub kube: Kube,
     pub kstep: usize,
+    pub ktab: KTab,
+    /// The cluster as its API reports it, and why it couldn't be read.
+    pub ksnap: Option<crate::engine::kube::Snapshot>,
+    pub kerr: String,
+    /// Pod (as listed) -> its Docker container, for logs.
+    pub pod_logs: HashMap<String, String>,
 
     pub pull: Option<Pull>,
     pub pulled: bool,
@@ -645,6 +739,8 @@ pub struct State {
     pub toast: Option<Toast>,
     pub tk: u32,
     pub banner: Option<Banner>,
+    /// The outdated-engine banner was closed; don't bring it back.
+    pub stale_dismissed: bool,
     /// A text field to focus on the next frame.
     pub focus: Option<&'static str>,
 
@@ -734,6 +830,10 @@ impl State {
             pods: Vec::new(),
             kube: Kube::Off,
             kstep: 0,
+            ktab: KTab::Pods,
+            ksnap: None,
+            kerr: String::new(),
+            pod_logs: HashMap::new(),
             pull: None,
             pulled: false,
             pull_gen: 0,
@@ -770,6 +870,7 @@ impl State {
                 "diskfull" => Some(Banner::Disk),
                 _ => None,
             },
+            stale_dismissed: false,
             focus: None,
             live: None,
             pending: HashMap::new(),
@@ -954,6 +1055,7 @@ impl State {
             .collect();
         if k_on {
             s.kube = Kube::On;
+            s.ksnap = Some(demo_kube());
         }
 
         if view == View::Settings && phase == "dirty" {
@@ -1347,6 +1449,9 @@ impl State {
         if view != self.view {
             if (view == View::Builds) != (self.view == View::Builds) {
                 self.send(LCmd::BuildsOpen(view == View::Builds));
+            }
+            if (view == View::Kubernetes) != (self.view == View::Kubernetes) {
+                self.send(LCmd::KubeOpen(view == View::Kubernetes));
             }
             self.view = view;
             self.view_at = self.time;
@@ -2162,6 +2267,7 @@ impl State {
                 self.after(2900, |s| {
                     if s.kube == Kube::Starting {
                         s.kube = Kube::On;
+                        s.ksnap = Some(demo_kube());
                         for (i, id) in PODS.iter().enumerate() {
                             s.after(150 * i as u64, move |s| {
                                 let now = s.time;
@@ -2176,6 +2282,7 @@ impl State {
             }
             Kube::On => {
                 self.kube = Kube::Off;
+                self.ksnap = None;
                 for p in self.pods.iter_mut() {
                     p.shown = false;
                 }
@@ -2568,6 +2675,9 @@ impl State {
         if s.view == View::Builds {
             s.send(LCmd::BuildsOpen(true));
         }
+        if s.view == View::Kubernetes {
+            s.send(LCmd::KubeOpen(true));
+        }
         s.installed = crate::engine::setup::installed();
         let cfg = crate::engine::config::load();
         s.saved = (cfg.cpus, cfg.memory_gb);
@@ -2609,6 +2719,11 @@ impl State {
         match ev {
             live::Ev::Up(info) => {
                 let disk = self.info.disk_gb;
+                match (info.stale, self.banner) {
+                    (true, None) if !self.stale_dismissed => self.banner = Some(Banner::Stale),
+                    (false, Some(Banner::Stale)) => self.banner = None,
+                    _ => {}
+                }
                 self.info = info;
                 if self.info.disk_gb == 0.0 {
                     self.info.disk_gb = disk;
@@ -2703,6 +2818,13 @@ impl State {
                     }
                 }
             }
+            live::Ev::KubeData(Ok(snap)) => {
+                self.kerr.clear();
+                if self.kube != Kube::Off {
+                    self.ksnap = Some(snap);
+                }
+            }
+            live::Ev::KubeData(Err(e)) => self.kerr = e,
             live::Ev::Builds(Ok(list)) => {
                 self.builds_seen = true;
                 self.builds_err.clear();
@@ -2847,7 +2969,9 @@ impl State {
             }
             live::Ev::Kube { enabled, reachable, pods } => {
                 if !self.kube_busy {
-                    let all_running = !pods.is_empty() && pods.iter().all(|p| p.running);
+                    // The cluster is up when its own pods are; yours can be in any state.
+                    let sys: Vec<_> = pods.iter().filter(|p| !p.id.contains('/')).collect();
+                    let all_running = !sys.is_empty() && sys.iter().all(|p| p.running);
                     self.kube = if !enabled {
                         Kube::Off
                     } else if reachable && all_running {
@@ -2856,7 +2980,9 @@ impl State {
                         Kube::Starting
                     };
                 }
+                self.pod_logs = pods.iter().filter(|p| !p.container.is_empty()).map(|p| (p.id.clone(), p.container.clone())).collect();
                 if self.kube == Kube::Off {
+                    self.ksnap = None;
                     for p in self.pods.iter_mut() {
                         p.shown = false;
                     }

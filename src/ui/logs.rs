@@ -98,9 +98,33 @@ fn tint(k: u8) -> Color32 {
     }
 }
 
+/// A pod's container, as Docker names it: `k8s_<container>_<pod>_<namespace>_<uid>_<attempt>`.
+fn pod_of(id: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = id.strip_prefix("k8s_")?.split('_');
+    let (container, pod, ns) = (parts.next()?, parts.next()?, parts.next()?);
+    Some((container, pod, ns))
+}
+
 /// Title, status line and its dot colour for what the page shows.
 fn heading(s: &State, page: &Page) -> (String, String, Color32) {
     match page {
+        Page::Logs(id) if s.alive().all(|c| c.id != *id) && pod_of(id).is_some() => {
+            let (container, pod, ns) = pod_of(id).unwrap_or_default();
+            let found = s.ksnap.as_ref().and_then(|k| k.objs.iter().find(|o| o.kind == "Pod" && o.ns == ns && o.name == pod));
+            let (status, col) = match found {
+                Some(o) => (
+                    o.cols.get(1).cloned().unwrap_or_default(),
+                    match o.health {
+                        crate::engine::kube::Health::Good => VERDIGRIS,
+                        crate::engine::kube::Health::Busy => COPPER,
+                        crate::engine::kube::Health::Bad => DANGER,
+                        crate::engine::kube::Health::Idle => DIM,
+                    },
+                ),
+                None => ("Pod".to_string(), DIM),
+            };
+            (pod.to_string(), format!("{status} · {container} in {ns}"), col)
+        }
         Page::Logs(id) => {
             let Some(c) = s.alive().find(|c| c.id == *id) else { return (id.clone(), "Removed".into(), DIM) };
             let (st, col) = match c.st {
@@ -145,7 +169,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
 
     // ---- back, history, copy
     let cy = y + 17.0;
-    let back = if matches!(page, Page::Logs(_)) { "Containers" } else { "Builds" };
+    let back = match &page {
+        Page::Logs(id) if pod_of(id).is_some() => "Kubernetes",
+        Page::Logs(_) => "Containers",
+        Page::BuildLog(_) => "Builds",
+    };
     let (br, _) = Btn::ghost(back).pad(12.0).with_icon(icons::BACK, Ink::Stroke(1.6), 16.0).at_left(&mut pui, area.left(), cy, Id::new("page-back"));
     if br.clicked() {
         cx.fx.push(Box::new(|s| s.close_page()));
@@ -297,6 +325,12 @@ mod tests {
         assert_eq!(r.shown.len(), 5);
         r.update(&more, 1, 10, "short");
         assert_eq!(r.shown, [0, 4]);
+    }
+
+    #[test]
+    fn reads_pod_container_names() {
+        assert_eq!(pod_of("k8s_web_web-7c9f6d8b5-x2kqp_shop_3f1c9a2e-7d4b_0"), Some(("web", "web-7c9f6d8b5-x2kqp", "shop")));
+        assert_eq!(pod_of("cps-postgres"), None);
     }
 
     #[test]

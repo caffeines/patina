@@ -2621,6 +2621,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "patina"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "block2 0.6.2",
  "bollard",
  "chrono",
@@ -2635,6 +2636,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-virtualization",
  "png 0.17.16",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

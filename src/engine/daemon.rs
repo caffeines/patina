@@ -88,7 +88,7 @@ pub fn run() -> i32 {
     log(&format!("starting Patina engine: {} CPUs, {} GB memory, first boot: {first_boot}", cfg.cpus, cfg.memory_gb));
 
     let shared = Arc::new(Shared {
-        status: Mutex::new(Status { state: "starting".into(), message: "Starting the VM".into(), first_boot, uptime: 0.0, vm: String::new() }),
+        status: Mutex::new(Status { state: "starting".into(), message: "Starting the VM".into(), first_boot, uptime: 0.0, vm: String::new(), rev: super::control::ENGINE_REV }),
         started: Instant::now(),
         stopping: AtomicBool::new(false),
         was_running: AtomicBool::new(false),
@@ -288,6 +288,9 @@ async fn forwarder(sh: Arc<Shared>) {
         let Some(d) = &docker else { continue };
         let Ok(list) = d.list_containers(Some(ListContainersOptionsBuilder::new().all(false).build())).await else { continue };
         let mut want: HashSet<u16> = HashSet::new();
+        if config::load().kubernetes {
+            want.insert(super::kube::API_PORT);
+        }
         for c in &list {
             for p in c.ports.iter().flatten() {
                 let tcp = p.typ.map(|t| t.to_string()).is_none_or(|t| t == "tcp");

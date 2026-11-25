@@ -5,7 +5,7 @@ use egui::{pos2, vec2, Align, Align2, Context, CursorIcon, Frame, Id, Margin, Re
 
 use super::{assets, builds, containers, enter, kube, logs, machines, settings, swap, Cx};
 use crate::icons::{self, Ink};
-use crate::sim::{fmt_count, fmt_size, Banner, Engine, Filter, Job, ModalKind, Pane, St, State, View};
+use crate::sim::{fmt_count, fmt_size, Banner, Engine, Filter, Job, KTab, Kube, ModalKind, Pane, St, State, View};
 use crate::theme::*;
 use crate::tween::Ease;
 use crate::widgets::{self as w, Btn};
@@ -70,6 +70,13 @@ fn banner(ui: &mut Ui, cx: &mut Cx) {
             format!("58.9 of 64 GB used. Unused images take up {}.", fmt_size(spare_mb)),
             "Prune unused",
         ),
+        Banner::Stale => (
+            COPPER,
+            WARN_EDGE,
+            "The engine is running an older build of Patina.".to_string(),
+            "Restart it to finish updating. Containers without a restart policy stay stopped.".to_string(),
+            "Restart engine",
+        ),
     };
     let wd = ui.available_width();
     let yes_btn = Btn::cta(yes).h(30.0).pad(13.0).radius(8.0).tone(c);
@@ -94,13 +101,20 @@ fn banner(ui: &mut Ui, cx: &mut Cx) {
     let close = Btn::icon(icons::CLOSE, Ink::Stroke(1.4)).color(MUTED);
     let (cr, _) = close.at_right(&mut bui, rect.right() - 8.0, cy, Id::new("banner-x"));
     if cr.clicked() {
-        cx.fx.push(Box::new(|s| s.banner = None));
+        cx.fx.push(Box::new(move |s| {
+            s.stale_dismissed |= b == Banner::Stale;
+            s.banner = None;
+        }));
     }
     let (yr, _) = yes_btn.at_right(&mut bui, rect.right() - 8.0 - 30.0 - 12.0, cy, Id::new("banner-yes"));
     if yr.clicked() {
         cx.fx.push(match b {
             Banner::Update => Box::new(|s: &mut State| s.apply_update()),
             Banner::Disk => Box::new(|s: &mut State| s.ask_modal(ModalKind::Prune, "")),
+            Banner::Stale => Box::new(|s: &mut State| {
+                s.banner = None;
+                s.reboot();
+            }),
         });
     }
     ui.add_space(14.0);
@@ -162,7 +176,8 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx) {
     }
 
     // Search
-    if (view == View::Containers || view == View::Builds || is_asset(view)) && !down {
+    let kube_on = view == View::Kubernetes && cx.s.kube == Kube::On;
+    if (view == View::Containers || view == View::Builds || kube_on || is_asset(view)) && !down {
         let id = Id::new("search");
         let focused = ui.memory(|m| m.has_focus(id));
         let sw = cx.tw.f("search-w", if focused { 340.0 } else { 260.0 }, 0.35, Ease::OUT);
@@ -264,7 +279,13 @@ fn summary(s: &State, view: View) -> String {
             parts.join(" · ")
         }
         View::Machines => "Linux machines that share one kernel with your containers.".into(),
-        View::Kubernetes => "A single-node cluster for local development.".into(),
+        View::Kubernetes => match &s.ksnap {
+            Some(snap) if s.kube == Kube::On => {
+                let n = |t: KTab| snap.objs.iter().filter(|o| t.holds(o.kind)).count();
+                format!("{} · {} · {}", fmt_count(n(KTab::Pods), "pod"), fmt_count(n(KTab::Workloads), "workload"), fmt_count(n(KTab::Services), "service"))
+            }
+            _ => "A single-node cluster for local development.".into(),
+        },
         View::Settings => "Resource limits apply after the engine restarts.".into(),
     }
 }
@@ -275,13 +296,19 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
     let is_set = view == View::Settings;
     let down = matches!(cx.s.engine, Engine::Off | Engine::Failed);
     let cold = cx.s.engine == Engine::Booting && cx.s.cold && !is_set;
+    let kube = view == View::Kubernetes;
     let seg: Vec<&str> = match view {
         View::Containers => vec!["All", "Running", "Stopped"],
         View::Settings => Pane::ALL.iter().map(|p| p.label()).collect(),
+        View::Kubernetes if cx.s.kube == Kube::On => KTab::ALL.iter().map(|t| t.label()).collect(),
         _ => vec![],
     };
-    let has_seg = !seg.is_empty() && (is_set || (!down && !cold && cx.s.alive().count() > 0));
-    let step = if view == View::Containers { 82.0 } else { 88.0 };
+    let has_seg = !seg.is_empty() && (is_set || kube || (!down && !cold && cx.s.alive().count() > 0));
+    let step = match view {
+        View::Containers => 82.0,
+        View::Kubernetes => 96.0,
+        _ => 88.0,
+    };
     let seg_w = seg.len() as f32 * step + 6.0;
 
     let title = w::g_ls(ui, chrome(view).0, semibold(28.0), TEXT, -0.7);
@@ -297,6 +324,8 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
         let sr = Rect::from_min_size(pos2(rect.right() - seg_w, rect.bottom() - 34.0), vec2(seg_w, 34.0));
         let cur = if is_set {
             Pane::ALL.iter().position(|p| *p == cx.s.pane).unwrap_or(0)
+        } else if kube {
+            KTab::ALL.iter().position(|t| *t == cx.s.ktab).unwrap_or(0)
         } else {
             match cx.s.filter {
                 Filter::All => 0,
@@ -308,6 +337,9 @@ fn header(ui: &mut Ui, cx: &mut Cx) {
             if is_set {
                 let pane = Pane::ALL[i];
                 cx.fx.push(Box::new(move |s| s.set_pane(pane)));
+            } else if kube {
+                let t = KTab::ALL[i];
+                cx.fx.push(Box::new(move |s| s.ktab = t));
             } else {
                 let f = [Filter::All, Filter::Running, Filter::Stopped][i];
                 cx.fx.push(Box::new(move |s| s.filter = f));
@@ -377,12 +409,8 @@ fn blocking(s: &State) -> Option<Block> {
     if cold {
         return None;
     }
-    if s.is_live() && !s.machines_ok && matches!(view, View::Machines | View::Kubernetes) {
-        let (title, body) = if view == View::Machines {
-            ("Linux machines aren't ready yet", "Patina's engine runs containers today. Full Linux machines that share it are next.")
-        } else {
-            ("Kubernetes isn't ready yet", "A local cluster on Patina's engine is next. Containers, images, volumes and networks work today.")
-        };
+    if s.is_live() && !s.machines_ok && view == View::Machines {
+        let (title, body) = ("Linux machines aren't ready yet", "Patina's engine runs containers today. Full Linux machines that share it are next.");
         return Some(block(icons::nav(view), title, body, "Show containers", Box::new(|s| s.go_view(View::Containers))));
     }
     let boxes: Vec<_> = s.alive().collect();

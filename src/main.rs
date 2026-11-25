@@ -183,6 +183,44 @@ fn engine_cli(args: &[String]) -> i32 {
                 }
             }
         }
+        Some("kube") => {
+            let on = match args.get(1).map(String::as_str) {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                Some("reset") => None,
+                _ => {
+                    eprintln!("usage: patina engine kube <on|off|reset>");
+                    return 2;
+                }
+            };
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+            let r = rt.block_on(async {
+                let d = bollard::Docker::connect_with_unix(&engine::paths::docker_sock().to_string_lossy(), 600, bollard::API_DEFAULT_VERSION)
+                    .map_err(|e| e.to_string())?
+                    .negotiate_version()
+                    .await
+                    .map_err(|_| "The engine isn't running.".to_string())?;
+                eprintln!("{}", match on { Some(true) => "Turning Kubernetes on. The first time installs k3s, which takes a minute or two.", Some(false) => "Turning Kubernetes off.", None => "Resetting the cluster." });
+                match on {
+                    Some(true) => engine::kube::up(&d).await,
+                    Some(false) => engine::kube::down(&d, false).await.map(|_| "Kubernetes is off.".into()),
+                    None => {
+                        engine::kube::down(&d, true).await?;
+                        engine::kube::up(&d).await
+                    }
+                }
+            });
+            match r {
+                Ok(msg) => {
+                    eprintln!("{msg}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
         Some("reset") => {
             if control::status().is_some() {
                 eprintln!("Stop the engine first.");
@@ -197,7 +235,7 @@ fn engine_cli(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("usage: patina engine <setup|start|stop|status|import|reset|run>");
+            eprintln!("usage: patina engine <setup|start|stop|status|import|kube|reset|run>");
             2
         }
     }

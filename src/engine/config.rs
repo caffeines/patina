@@ -22,12 +22,14 @@ pub struct EngineConfig {
     pub shell_path: bool,
     /// Keep the status item in the menu bar; closing the window keeps Patina there.
     pub menubar: bool,
+    /// Run the k3s cluster (and forward its API to localhost:6443).
+    pub kubernetes: bool,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         let host = host_cpus();
-        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true }
+        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true, kubernetes: false }
     }
 }
 

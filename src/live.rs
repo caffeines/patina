@@ -71,6 +71,8 @@ pub enum Cmd {
     OpenTerminal(String),
     /// The Builds view opened or closed (it refreshes faster while open).
     BuildsOpen(bool),
+    /// The same for the Kubernetes view.
+    KubeOpen(bool),
     BuildInfo(String),
     /// Stream a container's logs to the log page, from `tail` lines back.
     OpenLogs { id: String, tail: Option<u32> },
@@ -88,6 +90,8 @@ pub struct Info {
     pub arch: String,
     pub endpoint: String,
     pub disk_gb: f64,
+    /// The engine was started from an older build and should be restarted.
+    pub stale: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -120,9 +124,11 @@ pub struct PodSnap {
     pub ready: String,
     pub phase: String,
     pub running: bool,
+    /// Its Docker container, for logs.
+    pub container: String,
 }
 
-#[allow(dead_code)] // `Kube` is for the Kubernetes view, still to come
+#[allow(dead_code)] // `Machines` is for Linux machines, still to come
 pub enum Ev {
     Up(Info),
     /// Docker isn't reachable. `status` is the engine's own state when its
@@ -136,6 +142,9 @@ pub enum Ev {
     /// `None` while Linux machines aren't available.
     Machines(Option<Vec<MachSnap>>),
     Kube { enabled: bool, reachable: bool, pods: Vec<PodSnap> },
+    /// What the cluster's API reports: workloads, services, storage,
+    /// config and metrics, or why it can't be read.
+    KubeData(Result<engine::kube::Snapshot, String>),
     Config(HashMap<String, String>),
     Pull { image: String, layers: Vec<(String, f64)>, done: bool, err: Option<String> },
     /// Total disk used by images, containers and volumes, in GB.
@@ -551,6 +560,8 @@ struct W {
     df_busy: Arc<AtomicBool>,
     builds_busy: Arc<AtomicBool>,
     builds_open: bool,
+    kube_busy: Arc<AtomicBool>,
+    kube_open: bool,
     /// What the log page shows (and how far back), and its stream. The
     /// stream is restarted when it's missing, e.g. after the engine restarts.
     page: Option<(Page, Option<u32>)>,
@@ -574,6 +585,8 @@ async fn worker(mut rx: tmpsc::UnboundedReceiver<Cmd>, out: Out) {
         df_busy: Arc::new(AtomicBool::new(false)),
         builds_busy: Arc::new(AtomicBool::new(false)),
         builds_open: false,
+        kube_busy: Arc::new(AtomicBool::new(false)),
+        kube_open: false,
         page: None,
         page_task: None,
         last_down: None,
@@ -660,7 +673,12 @@ impl W {
             self.send_config();
         }
         self.seen = list.iter().map(seen).collect();
-        let mut boxes: Vec<BoxSnap> = list.iter().map(snap).collect();
+        let kube_on = config::load().kubernetes;
+        self.send_kube(&list, kube_on);
+        if kube_on && (first || forced || self.tick.is_multiple_of(if self.kube_open { 3 } else { 15 })) {
+            self.kube_data(&d);
+        }
+        let mut boxes: Vec<BoxSnap> = list.iter().filter(|c| !engine::kube::hidden(c)).map(snap).collect();
         boxes.sort_by(|a, b| a.id.cmp(&b.id));
         self.boxes = boxes.clone();
         self.out.send(Ev::Containers(boxes));
@@ -721,6 +739,7 @@ impl W {
             arch,
             endpoint: endpoint(),
             disk_gb: 0.0,
+            stale: blocking(control::status).await.flatten().is_some_and(|s| control::stale(&s)),
         }));
     }
 
@@ -849,6 +868,30 @@ impl W {
         self.sync_page();
     }
 
+    /// The cluster's state and pods, from the pods' containers.
+    fn send_kube(&self, list: &[ContainerSummary], enabled: bool) {
+        let pods: Vec<PodSnap> = engine::kube::pods(list)
+            .into_iter()
+            .map(|p| PodSnap { id: p.id, ready: p.ready, phase: p.phase, running: p.ok, container: p.container })
+            .collect();
+        let reachable = pods.iter().any(|p| p.running && !p.id.contains('/'));
+        self.out.send(Ev::Kube { enabled, reachable, pods });
+    }
+
+    /// Read the cluster's API off the main loop.
+    fn kube_data(&self, d: &Docker) {
+        if self.kube_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (d, out, busy) = (d.clone(), self.out.clone(), self.kube_busy.clone());
+        tokio::spawn(async move {
+            let _ = engine::kube::ensure_creds(&d).await;
+            let r = blocking(|| engine::kube::Api::load().and_then(|api| engine::kube::snapshot(&api))).await.unwrap_or_else(|| Err("The cluster check stopped.".into()));
+            out.send(Ev::KubeData(r));
+            busy.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// Build history, read through `docker buildx` off the main loop.
     fn builds(&self) {
         if self.builds_busy.swap(true, Ordering::SeqCst) {
@@ -968,6 +1011,14 @@ impl W {
         let out = self.out.clone();
         match cmd {
             Cmd::Refresh => {}
+            Cmd::KubeOpen(open) => {
+                self.kube_open = open;
+                if open && config::load().kubernetes {
+                    if let Some(d) = self.docker.clone() {
+                        self.kube_data(&d);
+                    }
+                }
+            }
             Cmd::BuildsOpen(open) => {
                 self.builds_open = open;
                 if open {
@@ -1139,8 +1190,22 @@ impl W {
             Cmd::MachineCreate { name, .. } => {
                 out.done(format!("mk:{name}"), Err("Linux machines aren't available yet.".into()));
             }
-            Cmd::Kube(_) | Cmd::KubeReset => {
-                out.done("kube", Err("Kubernetes isn't available yet.".into()));
+            Cmd::Kube(on) => {
+                let Some(d) = self.need_docker("kube") else { return };
+                tokio::spawn(async move {
+                    let r = if on { engine::kube::up(&d).await } else { engine::kube::down(&d, false).await.map(|_| String::new()) };
+                    out.done("kube", r);
+                });
+            }
+            Cmd::KubeReset => {
+                let Some(d) = self.need_docker("kube") else { return };
+                tokio::spawn(async move {
+                    let r = match engine::kube::down(&d, true).await {
+                        Ok(()) => engine::kube::up(&d).await.map(|_| "The cluster was reset. kubectl uses the patina context.".to_string()),
+                        Err(e) => Err(e),
+                    };
+                    out.done("kube", r);
+                });
             }
             Cmd::Config(k, v) => {
                 let on = v == "true";

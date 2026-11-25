@@ -17,6 +17,7 @@ pub mod config;
 pub mod control;
 pub mod guest;
 pub mod integrate;
+pub mod kube;
 pub mod migrate;
 pub mod paths;
 pub mod setup;

@@ -22,6 +22,28 @@ pub struct Status {
     /// The VM's state as Virtualization reports it.
     #[serde(default)]
     pub vm: String,
+    /// The engine's revision ([`ENGINE_REV`] of the build it runs). Engines
+    /// from before revisions report 0.
+    #[serde(default)]
+    pub rev: u32,
+}
+
+/// What the engine process can do, bumped whenever that changes, so an
+/// engine left running across an update is noticed and restarted.
+/// 1: forwards the Kubernetes API, reports its revision.
+pub const ENGINE_REV: u32 = 1;
+
+/// The running engine is older than this app and lacks what changed since.
+pub fn stale(s: &Status) -> bool {
+    s.rev < ENGINE_REV
+}
+
+/// This build of Patina: its executable's size and modification time.
+fn build_stamp() -> String {
+    std::env::current_exe()
+        .and_then(fs::metadata)
+        .map(|m| format!("{}:{:?}", m.len(), m.modified().ok()))
+        .unwrap_or_default()
 }
 
 fn request(cmd: &str) -> Option<String> {
@@ -115,8 +137,7 @@ fn ensure_helper() -> Result<PathBuf, String> {
         return Ok(exe);
     }
     let dst = paths::helper();
-    let meta = fs::metadata(&exe).map_err(|e| e.to_string())?;
-    let stamp = format!("{}:{:?}", meta.len(), meta.modified().ok());
+    let stamp = build_stamp();
     let stamp_file = paths::vm().join("helper.stamp");
     if dst.exists() && fs::read_to_string(&stamp_file).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(dst);

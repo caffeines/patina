@@ -72,6 +72,38 @@ To build a double-clickable app into `target/Patina.app`, and to run the tests:
 cargo test
 ```
 
+## Release a DMG
+
+`./scripts/release-macos.sh` builds `target/dist/Patina-<version>-arm64.dmg`. Without the
+variables below, the DMG gets an ad-hoc signature, which works on this Mac but other Macs block.
+
+To publish one that opens cleanly on any Mac:
+
+1. **Get a Developer ID Application certificate.** It comes with the paid Apple Developer
+   Program; the account holder creates it in Xcode › Settings › Accounts › Manage
+   Certificates › +. (An "Apple Development" certificate can't sign for distribution.)
+2. **Save notarization credentials once.** Use an app-specific password from
+   account.apple.com:
+   ```sh
+   xcrun notarytool store-credentials patina-notary \
+     --apple-id you@example.com --team-id TEAMID --password app-specific-password
+   ```
+3. **Build, sign and notarize:**
+   ```sh
+   DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" \
+   NOTARY_PROFILE=patina-notary \
+   BUNDLE_ID=com.yourname.patina \
+   ./scripts/release-macos.sh
+   ```
+   The script signs the app (hardened runtime plus the virtualization entitlement in
+   `scripts/Patina.entitlements`), builds the DMG, signs it, sends it to Apple, and staples the
+   ticket.
+4. **Publish it.** For example, attach it to a GitHub release with
+   `gh release create v0.1.0 target/dist/Patina-0.1.0-arm64.dmg`.
+
+Bump `version` in `Cargo.toml` for each release. The DMG is for Apple silicon and macOS 13 or
+later.
+
 ## What works
 
 - **Containers:** grouped by Compose project, with live CPU sparklines, real logs, and real exit

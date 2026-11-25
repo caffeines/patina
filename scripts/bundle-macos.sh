@@ -1,5 +1,10 @@
 #!/bin/sh
-# Build Patina.app (release) with its icon, in target/.
+# Build target/Patina.app (release), with its icon, signed with the
+# virtualization entitlement and the hardened runtime.
+#
+#   DEVELOPER_ID  signing identity, e.g. "Developer ID Application: Name (TEAMID)".
+#                 Unset: ad-hoc signature (fine on this Mac, not for distribution).
+#   BUNDLE_ID     bundle identifier (default: local.patina.desktop).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -8,6 +13,8 @@ cargo build --release
 APP=target/Patina.app
 ICONSET=target/Patina.iconset
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+BUNDLE_ID="${BUNDLE_ID:-local.patina.desktop}"
+IDENTITY="${DEVELOPER_ID:--}"
 
 rm -rf "$APP" "$ICONSET"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ICONSET"
@@ -28,16 +35,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Patina</string>
   <key>CFBundleDisplayName</key><string>Patina</string>
-  <key>CFBundleIdentifier</key><string>local.patina.desktop</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>Patina</string>
   <key>CFBundleIconFile</key><string>Patina</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 PLIST
 
-echo "Built $APP"
+if [ "$IDENTITY" = "-" ]; then
+  TIMESTAMP="--timestamp=none"
+else
+  TIMESTAMP="--timestamp"
+fi
+codesign --force --options runtime $TIMESTAMP \
+  --entitlements scripts/Patina.entitlements \
+  --sign "$IDENTITY" "$APP"
+codesign --verify --strict "$APP"
+
+echo "Built $APP (signed: $IDENTITY)"

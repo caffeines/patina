@@ -96,11 +96,24 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
-/// Running a VM needs Apple's virtualization entitlement. Keep a copy of this
-/// executable in `~/.patina/bin`, signed (ad hoc) with that entitlement, and
-/// refresh it whenever the app changes.
+/// Whether `path` is signed with Apple's virtualization entitlement.
+fn has_vz_entitlement(path: &std::path::Path) -> bool {
+    Command::new("/usr/bin/codesign")
+        .args(["-d", "--entitlements", "-", "--xml"])
+        .arg(path)
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("com.apple.security.virtualization"))
+}
+
+/// Running a VM needs Apple's virtualization entitlement. A packaged
+/// Patina.app is signed with it, so it runs the engine itself. A development
+/// build isn't: keep a copy of it in `~/.patina/bin`, signed (ad hoc) with
+/// the entitlement, and refresh it whenever the build changes.
 fn ensure_helper() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if has_vz_entitlement(&exe) {
+        return Ok(exe);
+    }
     let dst = paths::helper();
     let meta = fs::metadata(&exe).map_err(|e| e.to_string())?;
     let stamp = format!("{}:{:?}", meta.len(), meta.modified().ok());

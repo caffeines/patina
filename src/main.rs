@@ -158,6 +158,30 @@ fn engine_cli(args: &[String]) -> i32 {
                 3
             }
         },
+        Some("import") => {
+            let Some(src) = engine::migrate::detect() else {
+                eprintln!("No Docker Desktop, Colima or OrbStack with anything to import.");
+                return 0;
+            };
+            if !src.running {
+                eprintln!("{} isn't running. Start it, then run this again.", src.name);
+                return 1;
+            }
+            eprintln!("Importing {} images, {} volumes and {} containers from {}", src.images, src.volumes, src.containers, src.name);
+            match engine::migrate::run(&src, &report) {
+                Ok(s) => {
+                    eprintln!("\nCopied {} images, {} volumes and {} containers. Containers are stopped.", s.images, s.volumes, s.containers);
+                    for f in &s.failed {
+                        eprintln!("  couldn't copy {f}");
+                    }
+                    i32::from(!s.failed.is_empty())
+                }
+                Err(e) => {
+                    eprintln!("\n{e}");
+                    1
+                }
+            }
+        }
         Some("reset") => {
             if control::status().is_some() {
                 eprintln!("Stop the engine first.");
@@ -172,7 +196,7 @@ fn engine_cli(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("usage: patina engine <setup|start|stop|status|reset|run>");
+            eprintln!("usage: patina engine <setup|start|stop|status|import|reset|run>");
             2
         }
     }

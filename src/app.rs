@@ -453,14 +453,18 @@ fn mark_onboarded() {
     }
 }
 
-/// The app icon, drawn in code: the Patina mark on a dark rounded square.
+/// The app icon, drawn in code: the Patina mark on a white rounded square,
+/// shaded faintly toward the bottom, with a hairline edge so it holds its
+/// shape on white.
 pub fn app_icon(n: usize) -> egui::IconData {
     let mut rgba = vec![0u8; n * n * 4];
     let c = n as f32 / 2.0;
     let r_disc = n as f32 * 0.31;
     let half = n as f32 * 0.41;
     let rad = n as f32 * 0.09;
-    let bg = theme::SIDEBAR.to_array();
+    let edge = (n as f32 * 0.006).max(1.0);
+    let (top, bottom) = ([255.0, 255.0, 255.0], [243.0, 240.0, 235.0]);
+    let rim = [222u8, 216, 207, 255];
     let cu = theme::COPPER.to_array();
     let vg = theme::VERDIGRIS.to_array();
     for y in 0..n {
@@ -470,10 +474,12 @@ pub fn app_icon(n: usize) -> egui::IconData {
                 for sx in 0..4 {
                     let px = x as f32 + (sx as f32 + 0.5) / 4.0 - c;
                     let py = y as f32 + (sy as f32 + 0.5) / 4.0 - c;
-                    // rounded square
+                    // rounded square: distance inside its edge
                     let qx = (px.abs() - (half - rad)).max(0.0);
                     let qy = (py.abs() - (half - rad)).max(0.0);
-                    if qx * qx + qy * qy > rad * rad {
+                    let out = (qx * qx + qy * qy).sqrt() - rad;
+                    let inside = if qx > 0.0 || qy > 0.0 { -out } else { (half - px.abs()).min(half - py.abs()) };
+                    if out > 0.0 {
                         continue;
                     }
                     let col = if px * px + py * py <= r_disc * r_disc {
@@ -482,8 +488,12 @@ pub fn app_icon(n: usize) -> egui::IconData {
                         } else {
                             cu
                         }
+                    } else if inside < edge {
+                        rim
                     } else {
-                        bg
+                        let t = ((py + half) / (2.0 * half)).clamp(0.0, 1.0);
+                        let m = |k: usize| (top[k] + (bottom[k] - top[k]) * t) as u8;
+                        [m(0), m(1), m(2), 255]
                     };
                     for k in 0..3 {
                         acc[k] += col[k] as f32;

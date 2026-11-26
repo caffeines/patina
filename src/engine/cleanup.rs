@@ -423,10 +423,32 @@ pub fn disk_image_bytes() -> f64 {
     std::fs::metadata(paths::disk()).map(|m| m.blocks() as f64 * 512.0).unwrap_or(0.0)
 }
 
+/// Bytes used and in all on the filesystem that holds `path`, as `df` counts
+/// them. With this computer's own Docker Engine, that's the disk its data
+/// directory is on.
+pub fn fs_usage(path: &str) -> Option<(f64, f64)> {
+    let c = std::ffi::CString::new(path).ok()?;
+    // SAFETY: statvfs fills in the struct it's given, and `c` is a valid C string.
+    let mut v: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut v) } != 0 {
+        return None;
+    }
+    let block = v.f_frsize as f64;
+    let total = v.f_blocks as f64 * block;
+    Some((total - v.f_bfree as f64 * block, total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn measures_a_filesystem() {
+        let (used, total) = fs_usage("/").unwrap();
+        assert!(total > 0.0 && used > 0.0 && used <= total);
+        assert!(fs_usage("/no/such/path").is_none());
+    }
 
     fn df() -> Value {
         json!({

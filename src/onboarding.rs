@@ -69,11 +69,38 @@ impl Reporter {
     }
 }
 
+/// What each setup row does.
+const SETUP_ROWS: [&str; 3] = ["Install docker, compose and buildx", "Create the disk image", "Start the engine"];
+/// With this computer's own Docker Engine, setup only checks it, in the
+/// steps [`crate::engine::host::Problem`] counts.
+const CHECK_ROWS: [&str; 3] = ["Find Docker Engine", "Check you can use it", "Connect to it"];
+
+/// Check this computer's own Docker Engine: every row up to the one that
+/// found a problem passes, and that one fails with what to do.
+fn run_check(r: &Reporter) {
+    let failed = crate::engine::host::check().err();
+    for i in 0..3 {
+        r.send(SetupMsg::Start(i));
+        match &failed {
+            Some(p) if p.step == i => {
+                r.send(SetupMsg::Fail(i, p.message.clone()));
+                return;
+            }
+            _ => r.send(SetupMsg::Done(i)),
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// Install the command line tools, build the disk, start the engine.
 fn spawn_setup(ctx: egui::Context) -> mpsc::Receiver<SetupMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let r = Reporter { tx, ctx };
+        if crate::engine::NATIVE {
+            run_check(&r);
+            return;
+        }
         r.send(SetupMsg::Start(0));
         if let Err(e) = engine_setup::install_cli(&|f, n| r.progress(0, f, n)) {
             r.send(SetupMsg::Fail(0, e));
@@ -242,6 +269,11 @@ impl Onb {
 
     /// Look for Docker Desktop, Colima or OrbStack in the background.
     fn detect(&mut self) {
+        // Patina already uses this computer's own Docker Engine: what's
+        // there is already here.
+        if crate::engine::NATIVE {
+            return;
+        }
         if let Some(ctx) = self.ctx.clone() {
             self.mig_rx = Some(spawn_mig(ctx, |send| send(MigMsg::Found(migrate::detect()))));
         }
@@ -435,7 +467,18 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
         let src_name = o.source.as_ref().map_or("", |s| s.name.as_str());
         let src_running = o.source.as_ref().is_some_and(|s| s.running);
         let owned: (String, String, String);
-        let text: (&str, &str, &str) = if o.live {
+        let text: (&str, &str, &str) = if o.live && crate::engine::NATIVE {
+            owned = match o.step {
+                1 => (
+                    "Welcome".into(),
+                    "Containers for Linux".into(),
+                    "Patina shows and runs your containers, images, volumes and builds, using the Docker Engine already on this computer.".into(),
+                ),
+                2 => ("Step 2 of 3".into(), "Finding Docker".into(), "Patina checks that Docker Engine is installed and that you can use it. There's nothing to download.".into()),
+                _ => ("Step 3 of 3".into(), "Patina is ready".into(), "Patina is connected to Docker Engine. Use docker as usual, and see it all here.".into()),
+            };
+            (&owned.0, &owned.1, &owned.2)
+        } else if o.live {
             let n = if o.source.is_some() { 4 } else { 3 };
             owned = match o.step {
                 1 => (
@@ -495,7 +538,8 @@ pub fn show(ctx: &Context, o: &mut Onb, tw: &mut Tweens) -> bool {
             2 => {
                 let card = Rect::from_min_size(pos2(main.left(), y), vec2(main.width(), 52.0 * 3.0));
                 w::card(&mp, card, 14.0, CARD, CARD_EDGE);
-                for (i, label) in ["Install docker, compose and buildx", "Create the disk image", "Start the engine"].into_iter().enumerate() {
+                let rows = if o.live && crate::engine::NATIVE { CHECK_ROWS } else { SETUP_ROWS };
+                for (i, label) in rows.into_iter().enumerate() {
                     let top = card.top() + i as f32 * 52.0;
                     if i > 0 {
                         mp.line_segment([pos2(card.left(), top + 0.5), pos2(card.right(), top + 0.5)], Stroke::new(1.0_f32, HAIRLINE));

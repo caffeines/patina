@@ -38,6 +38,11 @@ pub async fn in_vm(d: &Docker, script: &str) -> Result<String, String> {
 
 /// [`in_vm`], handing each line it prints to `line` as it's printed.
 pub async fn in_vm_follow(d: &Docker, script: &str, line: &mut (dyn FnMut(&str) + Send)) -> Result<String, String> {
+    // This enters PID 1's namespaces. In Patina's VM that's the VM; with this
+    // computer's own Docker Engine it would be the computer itself, as root.
+    if super::NATIVE {
+        return Err("This needs Patina's VM, which Patina doesn't use on Linux yet.".into());
+    }
     if d.inspect_image(HELPER).await.is_err() {
         let (img, tag) = HELPER.split_once(':').unwrap_or((HELPER, "latest"));
         let mut pull = d.create_image(Some(CreateImageOptionsBuilder::new().from_image(img).tag(tag).build()), None, None);

@@ -77,6 +77,9 @@ fn rows(s: &State) -> Vec<RowDef> {
 
 /// Settings for Patina's own engine, stored in `~/.patina/config.json`.
 fn live_rows(s: &State) -> Vec<RowDef> {
+    if crate::engine::NATIVE {
+        return native_rows(s);
+    }
     use crate::engine::config::{host_cpus, host_mem_gb};
     let i = &s.info;
     let or = |v: &str, d: &str| if v.is_empty() { d.to_string() } else { v.to_string() };
@@ -126,6 +129,42 @@ fn live_rows(s: &State) -> Vec<RowDef> {
             row("Version", "Patina for Apple silicon.", Ctl::Text(env!("CARGO_PKG_VERSION").into())),
             row("Command line", "Add this folder to your PATH to use docker and docker-compose.", Ctl::Text(short(crate::engine::paths::bin()))),
             row("Data", "The disk image, logs and settings.", Ctl::Text(short(crate::engine::paths::root()))),
+        ],
+    }
+}
+
+/// Settings with this computer's own Docker Engine (Linux). Patina doesn't
+/// own that engine, so there are no limits, Rosetta or docker context to set.
+fn native_rows(s: &State) -> Vec<RowDef> {
+    let i = &s.info;
+    let or = |v: &str, d: &str| if v.is_empty() { d.to_string() } else { v.to_string() };
+    let disk = if i.disk_gb > 0.0 { format!("{:.1} GB", i.disk_gb) } else { "—".into() };
+    let home = crate::engine::paths::home().display().to_string();
+    let short = |p: std::path::PathBuf| p.display().to_string().replacen(&home, "~", 1);
+    match s.pane {
+        Pane::General => vec![
+            row("Open at login", "Start Patina when you sign in.", Ctl::Cfg("login", false)),
+            if crate::terminal::installed().is_empty() {
+                row("Terminal", "Open in Terminal needs a terminal app, such as GNOME Terminal or Konsole.", Ctl::Text("None found".into()))
+            } else {
+                row("Terminal", "Where Open in Terminal opens shells, for containers.", Ctl::Terminal)
+            },
+        ],
+        Pane::Resources => vec![
+            row("CPUs", "Docker Engine runs on this computer and may use all of it.", Ctl::Text(format!("{} cores", i.cpus))),
+            row("Disk usage", "Images, containers, volumes and build cache.", Ctl::Text(disk)),
+        ],
+        Pane::Network => vec![
+            row("Published ports", "A container port you publish answers on this computer.", Ctl::Text("localhost".into())),
+            row("Docker endpoint", "The Docker Engine socket Patina uses. Set DOCKER_HOST to choose another.", Ctl::Text(short(crate::engine::paths::docker_sock()))),
+        ],
+        Pane::Engine => vec![
+            row("Docker Engine", "Version reported by the engine.", Ctl::Text(or(&i.version, "—"))),
+            row("Linux", "This computer's system, which the engine runs on.", Ctl::Text(or(&i.runtime, "—"))),
+        ],
+        Pane::About => vec![
+            row("Version", "Patina for Linux.", Ctl::Text(env!("CARGO_PKG_VERSION").into())),
+            row("Data", "Settings and logs.", Ctl::Text(short(crate::engine::paths::root()))),
         ],
     }
 }

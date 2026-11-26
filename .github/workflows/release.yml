@@ -4,8 +4,11 @@
 #              tests, and build the DMG with scripts/release-macos.sh. With the
 #              signing secrets it's signed with a Developer ID and notarized;
 #              without them it's ad-hoc signed, like a local build.
+#    linux:    meanwhile, on Ubuntu 22.04 for x86_64 and aarch64, run the
+#              tests and build an AppImage and a .deb with
+#              scripts/release-linux.sh.
 # 2. release:  publish a GitHub release for the tag, with the commits since
-#              the last tag and the DMG attached.
+#              the last tag, and the DMG, AppImages and .debs attached.
 # 3. homebrew: point the tap's formula (caffeines/homebrew-patina) at the new
 #              tag and its commit, so `brew upgrade patina` builds it.
 #              Pre-releases (v1.2.3-beta.1) skip this.
@@ -125,9 +128,46 @@ jobs:
           path: target/dist/*.dmg
           if-no-files-found: error
 
+  linux:
+    name: Test and build for Linux (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          # 22.04's glibc (2.35) is old enough for most distributions in use.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build the AppImage and .deb
+        run: |
+          # appimagetool needs `file`.
+          command -v file > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq file; }
+          ./scripts/release-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            target/dist/*.AppImage
+            target/dist/*.deb
+          if-no-files-found: error
+
   release:
     name: Publish the GitHub release
-    needs: build
+    needs: [build, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,8 +177,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: dmg
           path: dist
+          merge-multiple: true
 
       - name: Write the release notes
         env:
@@ -155,6 +195,8 @@ jobs:
             echo
             echo "## Install"
             echo
+            echo "### macOS"
+            echo
             echo '```sh'
             echo "brew install caffeines/patina/patina    # builds $TAG from source"
             echo '```'
@@ -165,6 +207,17 @@ jobs:
               echo "The DMG below is ad-hoc signed, so macOS blocks it on Macs other than the one that built it."
               echo "Homebrew builds Patina on your Mac, which avoids that."
             fi
+            echo
+            echo "### Linux"
+            echo
+            echo "Patina uses the Docker Engine already on the computer: install Docker first, and be in the \`docker\` group."
+            echo "Download the AppImage for your architecture (any distribution), or on Debian and Ubuntu, the .deb:"
+            echo
+            echo '```sh'
+            echo "sudo apt install ./patina_${VERSION}_amd64.deb    # or _arm64"
+            echo '```'
+            echo
+            echo "Linux machines and Kubernetes are macOS-only for now."
             if [ -n "$prev" ]; then
               echo
               echo "**Full changes:** https://github.com/${GITHUB_REPOSITORY}/compare/$prev...$TAG"
@@ -180,11 +233,11 @@ jobs:
         run: |
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
-            gh release upload "$TAG" dist/*.dmg --clobber
+            gh release upload "$TAG" dist/* --clobber
           else
             flags=""
             [ "$PRERELEASE" = "true" ] && flags="--prerelease"
-            gh release create "$TAG" dist/*.dmg --verify-tag --title "Patina $VERSION" --notes-file notes.md $flags
+            gh release create "$TAG" dist/* --verify-tag --title "Patina $VERSION" --notes-file notes.md $flags
           fi
 
   homebrew:

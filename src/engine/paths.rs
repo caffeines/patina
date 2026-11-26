@@ -25,7 +25,12 @@ pub fn logs() -> PathBuf {
     root().join("logs")
 }
 
+/// The Docker API: Patina's engine on macOS, this computer's Docker Engine
+/// on Linux ([`super::host::socket`]).
 pub fn docker_sock() -> PathBuf {
+    if super::NATIVE {
+        return super::host::socket();
+    }
     run().join("docker.sock")
 }
 pub fn control_sock() -> PathBuf {
@@ -63,7 +68,12 @@ pub fn config() -> PathBuf {
 pub fn helper() -> PathBuf {
     bin().join("patina-engine")
 }
+/// The docker command: the one setup installs, or with this computer's own
+/// Docker Engine, the one on PATH.
 pub fn docker_cli() -> PathBuf {
+    if super::NATIVE {
+        return PathBuf::from("docker");
+    }
     bin().join("docker")
 }
 pub fn compose_cli() -> PathBuf {

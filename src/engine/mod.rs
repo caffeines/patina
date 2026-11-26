@@ -14,11 +14,15 @@
 //! - [`control`] is the app's side: start, stop and status.
 //! - [`machines`] runs Linux machines: system containers that boot their
 //!   distro's own init.
+//!
+//! On Linux there's no VM: Docker runs natively, so Patina uses the Docker
+//! Engine already on the computer ([`host`]) and [`NATIVE`] is true.
 
 pub mod cleanup;
 pub mod config;
 pub mod control;
 pub mod guest;
+pub mod host;
 pub mod integrate;
 pub mod kube;
 pub mod machines;
@@ -32,6 +36,11 @@ pub mod daemon;
 mod mdns;
 #[cfg(target_os = "macos")]
 mod vm;
+
+/// Patina uses this computer's own Docker Engine instead of booting a VM:
+/// everywhere but macOS. Patina doesn't own that engine, so it doesn't set it
+/// up, start, stop or reset it.
+pub const NATIVE: bool = cfg!(not(target_os = "macos"));
 
 /// vsock port where the guest serves the Docker API.
 pub const PORT_DOCKER: u32 = 2375;

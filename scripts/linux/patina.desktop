@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Patina
+GenericName=Container Manager
+Comment=Containers, images, volumes and builds on this computer's Docker Engine
+Exec=patina
+Icon=patina
+Terminal=false
+Categories=Development;
+Keywords=docker;containers;compose;images;volumes;
+StartupWMClass=patina

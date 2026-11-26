@@ -2767,12 +2767,16 @@ impl State {
                     s.pull_image();
                 }),
             },
-            Cmd {
-                label: if on { "Restart the engine" } else { "Start the engine" }.into(),
+        ];
+        // Patina doesn't restart this computer's own Docker Engine.
+        let native = self.live.is_some() && crate::engine::NATIVE;
+        if !(on && native) {
+            list.push(Cmd {
+                label: if on { "Restart the engine" } else if native { "Check for Docker" } else { "Start the engine" }.into(),
                 hint: "Engine",
                 run: Box::new(move |s: &mut State| if on { s.reboot() } else { s.power_flip() }),
-            },
-        ];
+            });
+        }
         for c in self.alive() {
             let id = c.id.clone();
             list.push(Cmd {
@@ -3074,7 +3078,7 @@ impl State {
 
     /// The terminal app shells open in (its bundle id).
     pub fn terminal_app(&self) -> &str {
-        self.cfg.get("terminal").map_or(crate::terminal::DEFAULT, String::as_str)
+        self.cfg.get("terminal").map_or_else(|| crate::terminal::chosen(""), String::as_str)
     }
 
     pub fn set_terminal(&mut self, app: &str) {

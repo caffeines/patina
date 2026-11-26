@@ -27,7 +27,7 @@ Patina: containers and Linux machines for your Mac
 
 USAGE:
     patina [OPTIONS]
-    patina engine <setup|start|stop|status|import|kube|reset>
+    patina engine <setup|start|stop|status|import|kube|df|clean|reset>
     patina machine <list|create|start|stop|delete|shell>
 
 OPTIONS:
@@ -224,6 +224,61 @@ fn engine_cli(args: &[String]) -> i32 {
                 }
             }
         }
+        Some("df") | Some("clean") => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+            let clean = args.first().map(String::as_str) == Some("clean");
+            let r = rt.block_on(async {
+                let d = bollard::Docker::connect_with_unix(&engine::paths::docker_sock().to_string_lossy(), 1200, bollard::API_DEFAULT_VERSION)
+                    .map_err(|e| e.to_string())?
+                    .negotiate_version()
+                    .await
+                    .map_err(|_| "The engine isn't running.".to_string())?;
+                use engine::cleanup::{fmt_bytes, Sel};
+                if !clean {
+                    let u = engine::cleanup::usage(&d).await?;
+                    let row = |name: &str, p: engine::cleanup::Part, note: String| println!("{name:<16} {:>5}  {:>9}  {note}", p.n, fmt_bytes(p.bytes));
+                    row("Images", u.images, format!("{} unused, {} dangling, {} unused machine images", u.images_unused.n, u.dangling.n, u.distros_unused.n));
+                    row("Containers", u.containers, format!("{} running, {} stopped", u.running, u.stopped.n));
+                    row("Machines", u.machines, String::new());
+                    row("Volumes", u.volumes, format!("{} unused", u.volumes_unused.n));
+                    row("Build cache", u.cache, format!("{} reclaimable", fmt_bytes(u.cache_unused.bytes)));
+                    println!("{:<16} {:>5}  {:>9}  {} reclaimable", "Total", "", fmt_bytes(u.total()), fmt_bytes(u.reclaimable()));
+                    let limit = engine::config::load().disk_gb;
+                    println!("{:<16} {:>5}  {:>9}  of up to {limit} GB on this Mac", "Disk image", "", fmt_bytes(engine::cleanup::disk_image_bytes()));
+                    return Ok(String::new());
+                }
+                let mut sel = Sel::default();
+                if args.len() > 1 {
+                    sel = Sel { stopped: false, dangling: false, images: false, distros: false, cache: false, networks: false, volumes: false };
+                    for a in &args[1..] {
+                        match a.as_str() {
+                            "dangling" => sel.dangling = true,
+                            "images" => sel.images = true,
+                            "distros" => sel.distros = true,
+                            "cache" => sel.cache = true,
+                            "networks" => sel.networks = true,
+                            "stopped" => sel.stopped = true,
+                            "volumes" => sel.volumes = true,
+                            "all" => sel = Sel::all(),
+                            other => return Err(format!("Unknown kind: {other}. Use dangling, images, distros, cache, networks, stopped, volumes or all.")),
+                        }
+                    }
+                }
+                engine::cleanup::clean(&d, sel).await
+            });
+            match r {
+                Ok(msg) => {
+                    if !msg.is_empty() {
+                        eprintln!("{msg}.");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
         Some("reset") => {
             if control::status().is_some() {
                 eprintln!("Stop the engine first.");
@@ -238,7 +293,8 @@ fn engine_cli(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("usage: patina engine <setup|start|stop|status|import|kube|reset|run>");
+            eprintln!("usage: patina engine <setup|start|stop|status|import|kube|df|clean|reset|run>");
+            eprintln!("       patina engine clean [dangling|images|distros|cache|networks|stopped|volumes|all ...]");
             2
         }
     }

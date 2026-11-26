@@ -15,6 +15,7 @@
 //! - [`machines`] runs Linux machines: system containers that boot their
 //!   distro's own init.
 
+pub mod cleanup;
 pub mod config;
 pub mod control;
 pub mod guest;

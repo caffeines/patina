@@ -64,7 +64,13 @@ patina engine status    # starting | booting | installing | running | stopping
 patina engine stop      # shut the guest down cleanly
 patina engine reset     # delete the VM disk (keeps downloads); run setup again after
 patina engine kube on   # Kubernetes (k3s) in the VM; also off | reset
+patina engine df        # what takes up the disk, and what's reclaimable
+patina engine clean     # remove what nothing uses (see Clean up below)
 ```
+
+`patina engine clean` takes the kinds to remove: `dangling`, `images`, `distros` (machine base
+images no machine uses), `cache`, `networks`, `stopped` (containers), `volumes`, or `all`. With
+none, it removes everything unused except stopped containers and volumes.
 
 ## Linux machines
 
@@ -224,6 +230,7 @@ cargo run -- --help                        # every option
 | `src/engine/guest.rs` | The guest's first-boot provisioning (cloud-init) |
 | `src/engine/control.rs` | The app's side: start, stop, status |
 | `src/engine/machines.rs` | Linux machines: base images, setup, addresses, create, start, stop |
+| `src/engine/cleanup.rs` | Disk usage by kind, and Clean up |
 | `src/engine/mdns.rs` | `<machine>.patina.local` names on this Mac (mDNSResponder, local only) |
 | `src/terminal.rs` | Opening shells in your terminal app |
 | `src/engine/kube.rs` | Kubernetes with k3s, and running scripts in the VM |

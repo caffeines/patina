@@ -384,11 +384,7 @@ fn blocking(s: &State) -> Option<Block> {
                 Box::new(|s| s.want_setup = true),
             ));
         }
-        let body = if s.is_live() {
-            "Containers, images and volumes are unavailable until it starts."
-        } else {
-            "Containers, images, volumes and machines are unavailable until it starts."
-        };
+        let body = "Containers, images, volumes and machines are unavailable until it starts.";
         return Some(block(icons::PLUG, "The engine is stopped", body, "Start engine", Box::new(|s| s.cold_boot())));
     }
     if !is_set && s.engine == Engine::Failed {
@@ -408,10 +404,6 @@ fn blocking(s: &State) -> Option<Block> {
     }
     if cold {
         return None;
-    }
-    if s.is_live() && !s.machines_ok && view == View::Machines {
-        let (title, body) = ("Linux machines aren't ready yet", "Patina's engine runs containers today. Full Linux machines that share it are next.");
-        return Some(block(icons::nav(view), title, body, "Show containers", Box::new(|s| s.go_view(View::Containers))));
     }
     let boxes: Vec<_> = s.alive().collect();
     if view == View::Containers {

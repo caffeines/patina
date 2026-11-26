@@ -12,18 +12,23 @@
 //!   virtio socket, forwards published container ports to localhost, and
 //!   answers status and stop requests on `~/.patina/run/engine.sock`.
 //! - [`control`] is the app's side: start, stop and status.
+//! - [`machines`] runs Linux machines: system containers that boot their
+//!   distro's own init.
 
 pub mod config;
 pub mod control;
 pub mod guest;
 pub mod integrate;
 pub mod kube;
+pub mod machines;
 pub mod migrate;
 pub mod paths;
 pub mod setup;
 
 #[cfg(target_os = "macos")]
 pub mod daemon;
+#[cfg(target_os = "macos")]
+mod mdns;
 #[cfg(target_os = "macos")]
 mod vm;
 

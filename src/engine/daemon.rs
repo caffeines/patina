@@ -5,6 +5,7 @@
 //! - `~/.patina/run/docker.sock`, piped to the guest's Docker over vsock,
 //! - `~/.patina/run/engine.sock`, a one-line protocol (`status`, `stop`),
 //! - localhost listeners for every published container port,
+//! - `<machine>.patina.local` names for running machines, on this Mac,
 //! - a monitor that notices when Docker is ready and when the VM stops.
 
 use std::collections::{HashMap, HashSet};
@@ -235,7 +236,6 @@ async fn monitor(sh: Arc<Shared>) {
                 if d.ping().await.is_ok() {
                     sh.status.lock().unwrap().first_boot = false;
                     sh.set("running", "Running");
-                    if config::load().set_context {
                     let d = d.clone();
                     tokio::spawn(async move {
                         match super::guest::upgrade(&d).await {
@@ -244,6 +244,7 @@ async fn monitor(sh: Arc<Shared>) {
                             Err(e) => log(&format!("couldn't upgrade the guest: {e}")),
                         }
                     });
+                    if config::load().set_context {
                         match tokio::task::spawn_blocking(super::integrate::use_context).await {
                             Ok(Ok(())) => log("the docker command now uses the patina context"),
                             Ok(Err(e)) => log(&format!("couldn't switch the docker context: {e}")),
@@ -281,10 +282,12 @@ async fn shutdown(sh: Arc<Shared>) {
     std::process::exit(0);
 }
 
-/// Mirror published container ports onto localhost.
+/// Mirror published container ports onto localhost, and name running
+/// machines.
 async fn forwarder(sh: Arc<Shared>) {
     let mut open: HashMap<u16, Vec<JoinHandle<()>>> = HashMap::new();
     let mut docker: Option<Docker> = None;
+    let mut names: Option<super::mdns::Names> = None;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
         if sh.state() != "running" {
@@ -295,6 +298,20 @@ async fn forwarder(sh: Arc<Shared>) {
         }
         let Some(d) = &docker else { continue };
         let Ok(list) = d.list_containers(Some(ListContainersOptionsBuilder::new().all(false).build())).await else { continue };
+        let machines: HashMap<String, std::net::Ipv4Addr> = list
+            .iter()
+            .filter_map(super::machines::info)
+            .filter_map(|m| Some((super::machines::domain(&m.name), m.ip.parse().ok()?)))
+            .collect();
+        if names.is_none() {
+            names = super::mdns::Names::new();
+        }
+        if let Some(n) = names.as_mut() {
+            if !n.set(&machines) {
+                log("mDNSResponder went away; naming machines again");
+                names = None;
+            }
+        }
         let mut want: HashSet<u16> = HashSet::new();
         if config::load().kubernetes {
             want.insert(super::kube::API_PORT);

@@ -32,7 +32,8 @@ pub struct Status {
 /// engine left running across an update is noticed and restarted.
 /// 1: forwards the Kubernetes API, reports its revision.
 /// 2: upgrades the guest so `docker run` and `docker exec` output isn't cut off.
-pub const ENGINE_REV: u32 = 2;
+/// 3: names running machines `<name>.patina.local` on this Mac.
+pub const ENGINE_REV: u32 = 3;
 
 /// The running engine is older than this app and lacks what changed since.
 pub fn stale(s: &Status) -> bool {

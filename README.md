@@ -63,7 +63,46 @@ patina engine start     # boot the VM in the background
 patina engine status    # starting | booting | installing | running | stopping
 patina engine stop      # shut the guest down cleanly
 patina engine reset     # delete the VM disk (keeps downloads); run setup again after
+patina engine kube on   # Kubernetes (k3s) in the VM; also off | reset
 ```
+
+## Linux machines
+
+A machine is a full Linux system next to your containers, sharing the VM's kernel. Each one boots
+its distro's own init (systemd, or OpenRC on Alpine), so `systemctl`, services and `sudo` work as
+they do on a server. It has a user with your Mac name and uid and passwordless sudo, a home of
+its own in `/home`, and your Mac home folder at the same path, as in containers. Its files last
+until you delete it, and machines that were running start again with the engine.
+
+Create one from the Machines view, or from a terminal:
+
+```sh
+patina machine create               # ubuntu, named ubuntu (or ubuntu-2, ... when taken)
+patina machine create fedora dev    # or debian, arch, alpine, with a name of your choice
+patina machine shell ubuntu         # a login shell as your user
+patina machine list                 # names, distros, addresses and URLs
+patina machine stop ubuntu          # also start, delete
+```
+
+**Addresses.** Each machine gets a fixed address on the network macOS gives Patina's VM
+(`192.168.64.192`–`.254` by default, skipping addresses macOS has lent to other VMs). Your Mac
+reaches it directly on any port, so a server in a machine answers at `http://192.168.64.254`,
+port 80 included. The engine also names running machines `<name>.patina.local` on this Mac only
+(nothing is announced on your network), so `http://ubuntu.patina.local` works in a browser. The
+card shows the URL and address; the info button shows them with the user, mounts, shell command,
+memory and disk. Underneath it's an ipvlan network, `patina-machines`, that shares the VM's MAC
+address; the machine's default route stays on Docker's bridge, so it reaches published container
+ports at `172.17.0.1`.
+
+The first machine of a distro takes about a minute, and its card shows how far along it is: the
+download in megabytes, then each package as it installs. Patina starts the distro's official image,
+installs init and sudo, adds your user, and keeps the result as a base image
+(`patina.local/ubuntu:24.04` in Images). Later machines of that distro start in a few seconds.
+Arch Linux has no arm64 image on Docker Hub, so its root filesystem comes from
+[images.linuxcontainers.org](https://images.linuxcontainers.org), checked against the SHA-256
+published with it. Underneath, a machine is a privileged Docker container labelled
+`dev.patina.machine`, so `docker exec -it ubuntu su - $USER` works too. The Containers view
+leaves machines out.
 
 To build a double-clickable app into `target/Patina.app`, and to run the tests:
 
@@ -157,7 +196,13 @@ later.
   window keeps Patina running in the menu bar without a Dock icon; opening Patina again brings
   the window back. Settings › General turns it off, and then closing the window quits.
 
-**Not built yet:** Linux machines and Kubernetes. Those views say so.
+- **Linux machines:** Ubuntu, Debian, Fedora, Arch and Alpine, each with its own address and
+  `<name>.patina.local` URL, with start, stop, delete, details and Open in Terminal (see
+  [Linux machines](#linux-machines)).
+- **Terminal app:** Open in Terminal, for containers and machines, uses the app chosen in
+  Settings › General: Terminal, Warp, iTerm or Ghostty, whichever are installed.
+- **Kubernetes:** a single-node k3s cluster in the VM, merged into `~/.kube/config` as the
+  `patina` context, with a kubectl-style browser, pod logs, delete and scale.
 
 `--demo` runs the simulated engine from the design instead, with nothing touching Docker:
 
@@ -178,6 +223,10 @@ cargo run -- --help                        # every option
 | `src/engine/setup.rs` | Downloads, checksum check, disk and boot loader, the docker CLI |
 | `src/engine/guest.rs` | The guest's first-boot provisioning (cloud-init) |
 | `src/engine/control.rs` | The app's side: start, stop, status |
+| `src/engine/machines.rs` | Linux machines: base images, setup, addresses, create, start, stop |
+| `src/engine/mdns.rs` | `<machine>.patina.local` names on this Mac (mDNSResponder, local only) |
+| `src/terminal.rs` | Opening shells in your terminal app |
+| `src/engine/kube.rs` | Kubernetes with k3s, and running scripts in the VM |
 | `src/live.rs` | The app's Docker API client (bollard): polling, stats and log streams, actions |
 | `src/sim.rs` | App state and every action; the simulated engine for `--demo` |
 | `src/ui/`, `src/onboarding.rs` | The views and the first-run flow |

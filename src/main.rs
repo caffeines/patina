@@ -12,6 +12,7 @@ mod live;
 mod menubar;
 mod onboarding;
 mod sim;
+mod terminal;
 mod theme;
 mod tween;
 mod ui;
@@ -26,6 +27,8 @@ Patina: containers and Linux machines for your Mac
 
 USAGE:
     patina [OPTIONS]
+    patina engine <setup|start|stop|status|import|kube|reset>
+    patina machine <list|create|start|stop|delete|shell>
 
 OPTIONS:
     --demo              use the simulated engine from the design instead of real Docker
@@ -45,7 +48,7 @@ VIEW OPTIONS:
 DEMO OPTIONS (imply --demo):
     --scenario <name>   default | empty | loading | stopped | failed | trouble | update | diskfull | offline
     --show <name>       run | menu | delete | toast | palette | pull | blocked | prune | volume | machine
-                        | logs | buildlog | kubescale | kubedelete
+                        | machineinfo | creating | logs | buildlog | kubescale | kubedelete
     --phase <name>      invalid | conflict | busy | nomatch | on | dirty
 ";
 
@@ -241,10 +244,114 @@ fn engine_cli(args: &[String]) -> i32 {
     }
 }
 
+const MACHINE_USAGE: &str = "\
+usage: patina machine list
+       patina machine create [ubuntu|debian|fedora|arch|alpine] [name]
+       patina machine start|stop|delete|shell <name>";
+
+fn machine_cli(args: &[String]) -> i32 {
+    use engine::machines;
+    let arg = |i: usize| args.get(i).map(String::as_str);
+    let sock = format!("unix://{}", engine::paths::docker_sock().display());
+    if arg(0) == Some("shell") {
+        let Some(name) = arg(1).filter(|n| machines::valid_name(n)) else {
+            eprintln!("{MACHINE_USAGE}");
+            return 2;
+        };
+        use std::os::unix::process::CommandExt;
+        let e = std::process::Command::new(engine::paths::docker_cli()).arg("--host").arg(&sock).args(machines::shell_args(name)).exec();
+        eprintln!("Couldn't run docker: {e}");
+        return 1;
+    }
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+    let r: Result<String, String> = rt.block_on(async {
+        let d = bollard::Docker::connect_with_unix(&engine::paths::docker_sock().to_string_lossy(), 1200, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| e.to_string())?
+            .negotiate_version()
+            .await
+            .map_err(|_| "The engine isn't running. Start it with `patina engine start`.".to_string())?;
+        let name = |i: usize| arg(i).map(str::to_string).ok_or_else(|| MACHINE_USAGE.to_string());
+        match arg(0) {
+            Some("list") => {
+                let opts = bollard::query_parameters::ListContainersOptionsBuilder::new().all(true).build();
+                let list = d.list_containers(Some(opts)).await.map_err(|e| e.to_string())?;
+                let mut rows: Vec<_> = list.iter().filter_map(|c| Some((machines::info(c)?, c.status.clone().unwrap_or_default()))).collect();
+                rows.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+                if rows.is_empty() {
+                    return Ok("No machines yet. Create one with `patina machine create`.".into());
+                }
+                println!("{:<16} {:<18} {:<6} {:<16} {:<30} STATUS", "NAME", "DISTRO", "ARCH", "IP", "URL");
+                for (m, status) in rows {
+                    let ip = if m.ip.is_empty() { "-".to_string() } else { m.ip.clone() };
+                    let url = format!("http://{}", machines::domain(&m.name));
+                    println!("{:<16} {:<18} {:<6} {:<16} {:<30} {status}", m.name, m.distro, m.arch, ip, url);
+                }
+                Ok(String::new())
+            }
+            Some("create") => {
+                let distro = arg(1).unwrap_or("ubuntu").to_string();
+                let n = match arg(2) {
+                    Some(n) => n.to_string(),
+                    None => {
+                        let opts = bollard::query_parameters::ListContainersOptionsBuilder::new().all(true).build();
+                        let list = d.list_containers(Some(opts)).await.map_err(|e| e.to_string())?;
+                        let taken: Vec<String> = list.iter().flat_map(|c| c.names.iter().flatten()).map(|n| n.trim_start_matches('/').to_string()).collect();
+                        machines::free_name(&distro, &taken)
+                    }
+                };
+                eprintln!("Creating {n}. The first {distro} machine takes a minute while Patina sets it up.");
+                // One line that updates, and a new one when the stage changes.
+                let last = std::sync::Mutex::new(String::new());
+                let step = |s: &str, frac: Option<f32>| {
+                    let stage = s.split(" · ").next().unwrap_or(s).to_string();
+                    let mut last = last.lock().unwrap();
+                    if *last != stage && !last.is_empty() {
+                        eprintln!();
+                    }
+                    let pct = frac.map(|f| format!("{:>3.0}%", f * 100.0)).unwrap_or_default();
+                    eprint!("\r  {pct}  {s:<64}");
+                    *last = stage;
+                };
+                machines::create(&d, &distro, &n, &step).await?;
+                eprintln!();
+                let ip = machines::connect_lan(&d, &n).await.unwrap_or_default();
+                let at = if ip.is_empty() { String::new() } else { format!(" at {ip} (http://{})", machines::domain(&n)) };
+                Ok(format!("Created {n}{at}. Open a shell with `patina machine shell {n}`."))
+            }
+            Some("start") => machines::start(&d, &name(1)?).await.map(|_| String::new()),
+            Some("stop") => machines::stop(&d, &name(1)?).await.map(|_| String::new()),
+            Some("delete") => {
+                let n = name(1)?;
+                machines::delete(&d, &n).await.map(|_| format!("Deleted {n}."))
+            }
+            _ => Err(MACHINE_USAGE.to_string()),
+        }
+    });
+    match r {
+        Ok(msg) => {
+            if !msg.is_empty() {
+                eprintln!("{msg}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            if e == MACHINE_USAGE {
+                2
+            } else {
+                1
+            }
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("engine") {
         std::process::exit(engine_cli(&argv[2..]));
+    }
+    if argv.get(1).map(String::as_str) == Some("machine") {
+        std::process::exit(machine_cli(&argv[2..]));
     }
     let args = parse_args();
     let first_run = if args.demo { !app::is_onboarded() } else { !engine::setup::installed() };

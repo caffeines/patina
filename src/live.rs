@@ -41,7 +41,6 @@ pub enum EngineOp {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // machine and Kubernetes fields are for features still to come
 pub enum Cmd {
     Refresh,
     Select(String),
@@ -64,6 +63,10 @@ pub enum Cmd {
     MachineStop(String),
     MachineCreate { distro: String, name: String },
     MachineDelete(String),
+    /// Open a login shell in a machine, in your terminal app.
+    MachineShell(String),
+    /// Read a machine's disk and memory use for its details.
+    MachineDetails(String),
     Kube(bool),
     KubeReset,
     Config(String, String),
@@ -118,6 +121,10 @@ pub struct MachSnap {
     pub distro: String,
     pub st: St,
     pub arch: String,
+    /// "up 3 days" while it runs.
+    pub up: String,
+    /// Its address on the Mac's VM network; empty until it has one.
+    pub ip: String,
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +137,6 @@ pub struct PodSnap {
     pub container: String,
 }
 
-#[allow(dead_code)] // `Machines` is for Linux machines, still to come
 pub enum Ev {
     Up(Info),
     /// Docker isn't reachable. `status` is the engine's own state when its
@@ -141,8 +147,12 @@ pub enum Ev {
     Inspect { id: String, why: String, restart: String, hostname: String, loops: u32 },
     Logs { id: String, lines: Vec<(String, String, u8)>, reset: bool },
     Assets { imgs: Vec<Asset>, vols: Vec<Asset>, nets: Vec<Net> },
-    /// `None` while Linux machines aren't available.
+    /// `None` while the engine is down.
     Machines(Option<Vec<MachSnap>>),
+    /// What a machine being created is doing ("Downloading Ubuntu · 18 of
+    /// 29 MB") and how far along it is.
+    MachineStep { id: String, step: String, frac: Option<f32> },
+    MachineDetails { id: String, details: engine::machines::Details },
     Kube { enabled: bool, reachable: bool, pods: Vec<PodSnap> },
     /// What the cluster's API reports: workloads, services, storage,
     /// config and metrics, or why it can't be read.
@@ -467,14 +477,7 @@ fn snap(c: &ContainerSummary) -> BoxSnap {
         Some(S::REMOVING) | Some(S::STOPPING) => (St::Stopping, String::new(), 0),
         _ => (St::Stopped, String::new(), 0),
     };
-    let up = status
-        .strip_prefix("Up ")
-        .map(|s| {
-            let s = s.split(" (").next().unwrap_or(s);
-            let mut ch = s.chars();
-            ch.next().map(|f| f.to_lowercase().collect::<String>() + ch.as_str()).unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let up = uptime(&status);
     let mut ports: Vec<(u16, u16, String)> = c
         .ports
         .iter()
@@ -505,6 +508,32 @@ fn snap(c: &ContainerSummary) -> BoxSnap {
         loops,
         up,
     }
+}
+
+/// "3 days" from Docker's "Up 3 days (healthy)"; empty when it isn't up.
+fn uptime(status: &str) -> String {
+    status
+        .strip_prefix("Up ")
+        .map(|s| {
+            let s = s.split(" (").next().unwrap_or(s);
+            let mut ch = s.chars();
+            ch.next().map(|f| f.to_lowercase().collect::<String>() + ch.as_str()).unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+fn machine_snap(c: &ContainerSummary) -> Option<MachSnap> {
+    let m = engine::machines::info(c)?;
+    use ContainerSummaryStateEnum as S;
+    let st = match c.state {
+        Some(S::RUNNING) => St::Running,
+        Some(S::RESTARTING) => St::Starting,
+        Some(S::REMOVING) | Some(S::STOPPING) => St::Stopping,
+        _ => St::Stopped,
+    };
+    let up = uptime(c.status.as_deref().unwrap_or(""));
+    let up = if up.is_empty() { up } else { format!("up {up}") };
+    Some(MachSnap { id: m.name, distro: m.distro, st, arch: m.arch, up, ip: m.ip })
 }
 
 #[derive(Clone)]
@@ -680,8 +709,11 @@ impl W {
         if kube_on && (first || forced || self.tick.is_multiple_of(if self.kube_open { 3 } else { 15 })) {
             self.kube_data(&d);
         }
-        let mut boxes: Vec<BoxSnap> = list.iter().filter(|c| !engine::kube::hidden(c)).map(snap).collect();
+        let mut boxes: Vec<BoxSnap> = list.iter().filter(|c| !engine::kube::hidden(c) && !engine::machines::hidden(c)).map(snap).collect();
         boxes.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut machines: Vec<MachSnap> = list.iter().filter_map(machine_snap).collect();
+        machines.sort_by(|a, b| a.id.cmp(&b.id));
+        self.out.send(Ev::Machines(Some(machines)));
         self.boxes = boxes.clone();
         self.out.send(Ev::Containers(boxes));
         self.sync_stats(&d);
@@ -722,6 +754,7 @@ impl W {
         map.insert("set_context".to_string(), c.set_context.to_string());
         map.insert("shell_path".to_string(), c.shell_path.to_string());
         map.insert("menubar".to_string(), c.menubar.to_string());
+        map.insert("terminal".to_string(), crate::terminal::chosen(&c.terminal).to_string());
         self.out.send(Ev::Config(map));
     }
 
@@ -1200,11 +1233,48 @@ impl W {
                     out.done("engine", r.map(|_| String::new()));
                 });
             }
-            Cmd::MachineStart(n) | Cmd::MachineStop(n) | Cmd::MachineDelete(n) => {
-                out.done(format!("machine:{n}"), Err("Linux machines aren't available yet.".into()));
+            Cmd::MachineCreate { distro, name } => {
+                let Some(d) = self.need_docker(&format!("mk:{name}")) else { return };
+                tokio::spawn(async move {
+                    let (o, id) = (out.clone(), name.clone());
+                    let step = move |s: &str, frac: Option<f32>| o.send(Ev::MachineStep { id: id.clone(), step: s.to_string(), frac });
+                    let r = engine::machines::create(&d, &distro, &name, &step).await;
+                    out.done(format!("mk:{name}"), r.map(|_| format!("Created {name}")));
+                });
             }
-            Cmd::MachineCreate { name, .. } => {
-                out.done(format!("mk:{name}"), Err("Linux machines aren't available yet.".into()));
+            Cmd::MachineStart(n) => {
+                let Some(d) = self.need_docker(&format!("machine:{n}")) else { return };
+                tokio::spawn(async move {
+                    let r = engine::machines::start(&d, &n).await;
+                    out.done(format!("machine:{n}"), r.map(|_| String::new()));
+                });
+            }
+            Cmd::MachineStop(n) => {
+                let Some(d) = self.need_docker(&format!("machine:{n}")) else { return };
+                tokio::spawn(async move {
+                    let r = engine::machines::stop(&d, &n).await;
+                    out.done(format!("machine:{n}"), r.map(|_| String::new()));
+                });
+            }
+            Cmd::MachineDelete(n) => {
+                let Some(d) = self.need_docker(&format!("asset:{n}")) else { return };
+                tokio::spawn(async move {
+                    let r = engine::machines::delete(&d, &n).await;
+                    out.done(format!("asset:{n}"), r.map(|_| format!("Deleted {n}")));
+                });
+            }
+            Cmd::MachineShell(n) => {
+                if engine::machines::valid_name(&n) {
+                    terminal(engine::machines::shell_args(&n), out);
+                }
+            }
+            Cmd::MachineDetails(n) => {
+                let Some(d) = self.docker.clone() else { return };
+                tokio::spawn(async move {
+                    if let Ok(details) = engine::machines::details(&d, &n).await {
+                        out.send(Ev::MachineDetails { id: n, details });
+                    }
+                });
             }
             Cmd::Kube(on) => {
                 let Some(d) = self.need_docker("kube") else { return };
@@ -1227,6 +1297,7 @@ impl W {
                 let on = v == "true";
                 let mut c = config::load();
                 match k.as_str() {
+                    "terminal" => c.terminal = crate::terminal::chosen(&v).to_string(),
                     "rosetta" => c.rosetta = on,
                     "autostart" => c.autostart = on,
                     "login" => c.login = on,
@@ -1237,12 +1308,14 @@ impl W {
                 }
                 let saved = config::save(&c);
                 let key = k.clone();
+                let term = crate::terminal::APPS.iter().find(|a| a.0 == c.terminal).map_or("Terminal", |a| a.1);
                 // The docker context and shell profiles change right away.
                 let applied = blocking(move || match key.as_str() {
                     "set_context" if on => integrate::use_context().map(|_| "The docker command now uses Patina".to_string()),
                     "set_context" => integrate::release_context().map(|_| "The docker command uses the default context again".to_string()),
                     "shell_path" if on => integrate::install_shell().map(|_| "Open a new terminal to use Patina's docker".to_string()),
                     "shell_path" => integrate::remove_shell().map(|_| "Removed Patina from your shell profile".to_string()),
+                    "terminal" => Ok(format!("Shells open in {term}")),
                     _ => Ok(String::new()),
                 })
                 .await
@@ -1254,23 +1327,25 @@ impl W {
                 if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
                     return;
                 }
-                let docker = paths::docker_cli();
-                let host = endpoint();
-                let script = format!(
-                    "tell application \"Terminal\"\nactivate\ndo script \"'{}' --host '{}' exec -it {id} sh -c 'command -v bash >/dev/null && exec bash || exec sh'\"\nend tell",
-                    docker.display(),
-                    host
-                );
-                tokio::spawn(async move {
-                    let r = tokio::process::Command::new("/usr/bin/osascript").args(["-e", &script]).output().await;
-                    if !r.is_ok_and(|o| o.status.success()) {
-                        out.done("terminal", Err("Couldn't open Terminal.".into()));
-                    }
-                });
+                let args = ["exec", "-it", &id, "sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"];
+                terminal(args.map(String::from).to_vec(), out);
             }
         }
     }
 
+}
+
+/// Run Patina's docker with `args` in your terminal app.
+fn terminal(args: Vec<String>, out: Out) {
+    let mut words = vec![paths::docker_cli().display().to_string(), "--host".to_string(), endpoint()];
+    words.extend(args);
+    tokio::spawn(async move {
+        let app = config::load().terminal;
+        let r = blocking(move || crate::terminal::open(&app, &words)).await.unwrap_or_else(|| Err("Couldn't open a terminal.".into()));
+        if let Err(e) = r {
+            out.done("terminal", Err(e));
+        }
+    });
 }
 
 async fn list_assets(d: &Docker, seen: &[Seen], sizes: &std::sync::Mutex<HashMap<String, f64>>) -> Ev {
@@ -1517,6 +1592,13 @@ not json"#;
         assert_eq!(l.len(), 1);
         assert_eq!(l[0].1, "server listening on :80");
         assert_eq!(l[0].2, 1);
+    }
+
+    #[test]
+    fn reads_machine_uptime() {
+        assert_eq!(uptime("Up 3 days"), "3 days");
+        assert_eq!(uptime("Up About an hour (healthy)"), "about an hour");
+        assert_eq!(uptime("Exited (0) 2 minutes ago"), "");
     }
 
     #[test]

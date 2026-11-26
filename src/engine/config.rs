@@ -24,12 +24,14 @@ pub struct EngineConfig {
     pub menubar: bool,
     /// Run the k3s cluster (and forward its API to localhost:6443).
     pub kubernetes: bool,
+    /// The bundle id of the terminal app that shells open in (empty: Terminal).
+    pub terminal: String,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         let host = host_cpus();
-        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true, kubernetes: false }
+        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true, kubernetes: false, terminal: String::new() }
     }
 }
 

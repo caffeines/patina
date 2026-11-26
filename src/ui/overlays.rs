@@ -1,10 +1,11 @@
-//! Dialogs (confirm, create, run, new machine), the command palette and toasts.
+//! Dialogs (confirm, create, run, new machine, machine details), the command
+//! palette and toasts.
 
 use egui::{pos2, vec2, Align2, Area, Context, CursorIcon, Id, Key, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder};
 
 use super::{field, maybe_focus, Cx};
 use crate::icons::{self, Ink};
-use crate::sim::{Ov, DISTROS, RUN_PICKS};
+use crate::sim::{Ov, St, DISTROS, RUN_PICKS};
 use crate::theme::*;
 use crate::tween::Ease;
 use crate::widgets::{self as w, Btn};
@@ -33,6 +34,7 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
                 Ov::Modal => modal(ui, cx, screen, pa, pdy, enter),
                 Ov::Run => run(ui, cx, screen, pa, pdy, enter),
                 Ov::Machine => machine(ui, cx, screen, pa, pdy, enter),
+                Ov::MachineInfo => machine_info(ui, cx, screen, pa, pdy, enter),
                 Ov::Palette => {
                     if bg.clicked() {
                         cx.fx.push(Box::new(|s| s.close_ov()));
@@ -256,8 +258,8 @@ fn machine(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: boo
     y += grid_h + 18.0;
     w::text(&p, &dui, x, y + 8.5, "Name", sans(12.0), TEXT2);
     y += 17.0 + 6.0;
-    let ph = DISTROS[cx.s.mk.pick].0;
-    let resp = field(&mut dui, cx.tw, Rect::from_min_size(pos2(x, y), vec2(iw, 36.0)), Id::new("mk-name"), &mut cx.s.mk.name, ph, false, mono(12.5));
+    let ph = cx.s.default_machine_name();
+    let resp = field(&mut dui, cx.tw, Rect::from_min_size(pos2(x, y), vec2(iw, 36.0)), Id::new("mk-name"), &mut cx.s.mk.name, &ph, false, mono(12.5));
     maybe_focus(cx.s, "mk-name", &resp);
     y += 36.0 + 18.0;
     let busy = cx.s.mk.busy;
@@ -268,6 +270,138 @@ fn machine(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: boo
     let (go, _) = buttons(&mut dui, cx, rect.right() - 24.0, y + 17.0, "Cancel", yes);
     if (go || enter) && !cx.s.ov_out {
         cx.fx.push(Box::new(|s| s.make_machine()));
+    }
+}
+
+/// What to do with a details row's value.
+enum Act {
+    None,
+    Copy(&'static str),
+    Open,
+}
+
+fn machine_info(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: bool) {
+    use crate::engine::machines;
+    let Some(m) = cx.s.ms.iter().find(|m| m.id == cx.s.minfo && !m.gone).cloned() else {
+        cx.fx.push(Box::new(|s| s.close_ov()));
+        return;
+    };
+    let running = m.st == St::Running;
+    let live = cx.s.is_live();
+    // An engine from before revision 3 doesn't name machines; until it restarts, the address is the URL.
+    let named = !cx.s.info.stale;
+    let url = if m.ip.is_empty() {
+        String::new()
+    } else if named || !live {
+        format!("http://{}", machines::domain(&m.id))
+    } else {
+        format!("http://{}", m.ip)
+    };
+    let d = cx.s.mdetails.clone();
+    let loading = live && d.is_none();
+    let wait = |s: &str| if loading { "…".to_string() } else { s.to_string() };
+    let status = match m.st {
+        St::Running if !m.up.is_empty() => format!("Running · {}", m.up),
+        St::Running => "Running".into(),
+        St::Starting => "Starting".into(),
+        St::Stopping => "Stopping".into(),
+        _ => "Stopped".into(),
+    };
+    let (user, home) = if live {
+        (machines::user().0, crate::engine::paths::home().display().to_string())
+    } else {
+        ("you".to_string(), "~".to_string())
+    };
+    let rows: Vec<(&str, String, Act)> = vec![
+        ("Status", status, Act::None),
+        (
+            "Address",
+            if m.ip.is_empty() { "Assigned when it starts".into() } else { m.ip.clone() },
+            if m.ip.is_empty() { Act::None } else { Act::Copy("the address") },
+        ),
+        ("Local URL", if url.is_empty() { "—".into() } else { url.clone() }, if url.is_empty() || !running { Act::None } else { Act::Open }),
+        ("User", format!("{user}, with sudo"), Act::None),
+        ("Mac files", format!("{home}, at the same path"), Act::None),
+        ("Shell", format!("patina machine shell {}", m.id), Act::Copy("the command")),
+        (
+            "Memory",
+            if !running { "—".into() } else { wait(&d.as_ref().and_then(|d| d.mem_mb).map(crate::sim::fmt_size).unwrap_or_else(|| "—".into())) },
+            Act::None,
+        ),
+        ("Disk", wait(&d.as_ref().map(|d| crate::sim::fmt_size(d.disk_mb)).unwrap_or_else(|| "—".into())), Act::None),
+        (
+            "Created",
+            wait(&d.as_ref().and_then(|d| d.created).map(|t| crate::live::ago(chrono::Utc::now().timestamp() - t)).unwrap_or_else(|| "—".into())),
+            Act::None,
+        ),
+    ];
+    if loading {
+        cx.ambient = true;
+    }
+
+    let wd = 500.0f32.min(screen.width() - 48.0);
+    let row_h = 36.0;
+    let h = 24.0 + 24.0 + 4.0 + 19.0 + 16.0 + rows.len() as f32 * row_h + 20.0 + 34.0 + 24.0;
+    let rect = Rect::from_center_size(screen.center() + vec2(0.0, pdy), vec2(wd, h));
+    let mut dui = dialog(ui, rect, pa);
+    let p = dui.painter().clone();
+    let x = rect.left() + 24.0;
+    let right = rect.right() - 24.0;
+    let mut y = rect.top() + 24.0;
+    let dot_c = pos2(x + 5.0, y + 12.0);
+    cx.ambient |= w::status_dot(&p, cx.tw, Id::new(("minfo-dot", &m.id)), dot_c, m.st, false, m.fresh_at);
+    let tg = w::g_ls(&dui, &m.id, semibold(17.0), TEXT, -0.17);
+    w::put(&p, &tg, pos2(x + 20.0, y + 12.0), Align2::LEFT_CENTER);
+    y += 24.0 + 4.0;
+    w::text(&p, &dui, x + 20.0, y + 9.5, &format!("{} · {}", m.distro, m.arch), sans(13.5), TEXT2);
+    y += 19.0 + 16.0;
+
+    let vx = x + 104.0;
+    for (i, (label, value, act)) in rows.iter().enumerate() {
+        if i > 0 {
+            p.line_segment([pos2(x, y + 0.5), pos2(right, y + 0.5)], Stroke::new(1.0_f32, HAIRLINE));
+        }
+        let cy = y + row_h / 2.0;
+        w::text(&p, &dui, x, cy, label, sans(12.5), TEXT2);
+        let mut vmax = right - vx;
+        let mut clicked = false;
+        match act {
+            Act::None => {}
+            Act::Copy(_) | Act::Open => {
+                let b = Btn::ghost(if matches!(act, Act::Open) { "Open" } else { "Copy" }).h(26.0).pad(10.0).radius(7.0).font(medium(12.0)).color(TEXT2);
+                let (r, rr) = b.at_right(&mut dui, right, cy, Id::new(("minfo-act", i)));
+                clicked = r.clicked();
+                vmax = rr.left() - 10.0 - vx;
+            }
+        }
+        let color = if matches!(act, Act::Open) { VERDIGRIS } else { TEXT };
+        let g = w::g_elide(&dui, value, mono(12.5), color, vmax.max(40.0));
+        w::put(&p, &g, pos2(vx, cy), Align2::LEFT_CENTER);
+        if clicked {
+            match act {
+                Act::Copy(what) => {
+                    dui.ctx().copy_text(value.clone());
+                    let what = *what;
+                    cx.fx.push(Box::new(move |s| s.copied(what)));
+                }
+                Act::Open => {
+                    let u = url.clone();
+                    cx.fx.push(Box::new(move |s| s.open_url(u)));
+                }
+                Act::None => {}
+            }
+        }
+        y += row_h;
+    }
+    y += 20.0;
+    let yes = Btn::cta("Open in Terminal").enabled(running && live);
+    let (go, _) = buttons(&mut dui, cx, right, y + 17.0, "Close", yes);
+    if (go || (enter && running && live)) && !cx.s.ov_out {
+        let id = m.id.clone();
+        cx.fx.push(Box::new(move |s| {
+            s.open_machine_shell(&id);
+            s.close_ov();
+        }));
     }
 }
 

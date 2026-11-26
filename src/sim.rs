@@ -225,6 +225,8 @@ pub enum Ov {
     Run,
     Modal,
     Machine,
+    /// A machine's details: `State::minfo`.
+    MachineInfo,
     Palette,
 }
 
@@ -352,6 +354,12 @@ pub struct Machine {
     pub since: f64,
     pub born: f64,
     pub arch: String,
+    /// What it's doing while it's created ("Downloading Ubuntu").
+    pub note: String,
+    /// Its address on the Mac's VM network (live engine).
+    pub ip: String,
+    /// How far along creating it is, when that's known.
+    pub progress: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -756,6 +764,9 @@ pub struct State {
     pub modal: Modal,
     pub run: RunForm,
     pub mk: MkForm,
+    /// The machine the details dialog shows, and what the engine reported for it.
+    pub minfo: String,
+    pub mdetails: Option<crate::engine::machines::Details>,
     pub pal: Pal,
     pub menu: Option<String>,
     pub menu_at: f64,
@@ -786,7 +797,6 @@ pub struct State {
     /// The app should show setup (onboarding).
     pub want_setup: bool,
     pub endpoint: String,
-    pub machines_ok: bool,
     pub cfg: HashMap<String, String>,
     pub engine_log: String,
     pub urls: Vec<String>,
@@ -883,6 +893,8 @@ impl State {
             modal: Modal::default(),
             run: RunForm::default(),
             mk: MkForm::default(),
+            minfo: String::new(),
+            mdetails: None,
             pal: Pal::default(),
             menu: None,
             menu_at: now,
@@ -910,7 +922,6 @@ impl State {
             engine_msg: String::new(),
             want_setup: false,
             endpoint: String::new(),
-            machines_ok: true,
             cfg: HashMap::new(),
             engine_log: String::new(),
             urls: Vec::new(),
@@ -1046,6 +1057,9 @@ impl State {
                     since: -10.0,
                     born: -10.0,
                     arch: "arm64".into(),
+                    note: String::new(),
+                    ip: "192.168.64.254".into(),
+                    progress: None,
                 },
                 Machine {
                     id: "debian".into(),
@@ -1059,6 +1073,9 @@ impl State {
                     since: -10.0,
                     born: -10.0,
                     arch: "arm64".into(),
+                    note: String::new(),
+                    ip: "192.168.64.253".into(),
+                    progress: None,
                 },
             ];
         }
@@ -1116,6 +1133,17 @@ impl State {
                 s.view = View::Images;
                 s.ask_modal(ModalKind::Prune, "");
             }
+            "creating" => {
+                s.view = View::Machines;
+                let mut m = s.ms[0].clone();
+                m.id = "arch".into();
+                m.distro = "Arch Linux".into();
+                m.st = St::Starting;
+                m.ip.clear();
+                m.note = "Downloading Arch Linux · 64 of 179 MB".into();
+                m.progress = Some(0.16);
+                s.ms.push(m);
+            }
             "volume" => {
                 s.view = View::Volumes;
                 s.ask_modal(ModalKind::Volume, "");
@@ -1127,6 +1155,11 @@ impl State {
             "machine" => {
                 s.view = View::Machines;
                 s.open_mk();
+            }
+            "machineinfo" => {
+                s.view = View::Machines;
+                s.open_machine_info("ubuntu");
+                s.mdetails = Some(crate::engine::machines::Details { disk_mb: 1240.0, mem_mb: Some(38.0), created: Some(chrono::Utc::now().timestamp() - 3 * 86_400) });
             }
             "palette" => {
                 s.open_pal();
@@ -1722,6 +1755,17 @@ impl State {
         self.focus = Some("palette");
     }
 
+    /// Names machines and containers already have.
+    fn names_in_use(&self) -> Vec<String> {
+        self.ms.iter().filter(|m| !m.gone).map(|m| m.id.clone()).chain(self.cs.iter().filter(|c| !c.gone).map(|c| c.id.clone())).collect()
+    }
+
+    /// The name a new machine gets when none is typed: the distro, or the
+    /// distro with a number when that's taken.
+    pub fn default_machine_name(&self) -> String {
+        crate::engine::machines::free_name(DISTROS[self.mk.pick.min(DISTROS.len() - 1)].0, &self.names_in_use())
+    }
+
     pub fn open_mk(&mut self) {
         self.open_ov(Ov::Machine);
         self.mk = MkForm::default();
@@ -2257,11 +2301,9 @@ impl State {
             return;
         }
         let pick = DISTROS[self.mk.pick.min(DISTROS.len() - 1)];
-        let raw = if self.mk.name.trim().is_empty() { pick.0.to_string() } else { self.mk.name.trim().to_lowercase() };
-        let mut id: String = raw.chars().map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c } else { '-' }).collect();
-        if self.ms.iter().any(|m| m.id == id && !m.gone) {
-            id.push_str("-2");
-        }
+        let typed: String = self.mk.name.trim().to_lowercase().chars().map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c } else { '-' }).collect();
+        let typed: String = typed.trim_matches('-').chars().take(63).collect::<String>().trim_end_matches('-').to_string();
+        let id = crate::engine::machines::free_name(if typed.is_empty() { pick.0 } else { &typed }, &self.names_in_use());
         if self.live.is_some() {
             let now = self.time;
             self.ms.retain(|m| m.id != id);
@@ -2277,6 +2319,9 @@ impl State {
                 since: now,
                 born: now,
                 arch: "arm64".into(),
+                note: String::new(),
+                ip: String::new(),
+                progress: None,
             });
             self.pending_m.insert(id.clone(), St::Starting);
             self.send(LCmd::MachineCreate { distro: pick.0.to_string(), name: id });
@@ -2301,14 +2346,37 @@ impl State {
                 since: now,
                 born: now,
                 arch: "arm64".into(),
+                note: String::new(),
+                ip: format!("192.168.64.{}", 254 - s.ms.len().min(60)),
+                progress: None,
             });
             s.go_view(View::Machines);
             s.close_ov();
+            // The stages a real machine goes through, quickly.
+            let title = DISTROS.iter().find(|d| d.1 == s.ms.last().map_or("", |m| m.distro.as_str())).map_or("Linux", |d| d.1).split(' ').next().unwrap_or("Linux").to_string();
+            let steps = [
+                (0, format!("Downloading {title} · 6 of 29 MB"), 0.09),
+                (350, format!("Downloading {title} · 21 of 29 MB"), 0.33),
+                (700, format!("Setting up {title} · installing 18 of 45"), 0.66),
+                (1050, format!("Setting up {title} · installing 41 of 45"), 0.9),
+                (1400, "Starting".to_string(), 0.97),
+            ];
+            for (ms, note, f) in steps {
+                let id = id.clone();
+                s.after(ms, move |s| {
+                    s.patch_machine(&id, |m| {
+                        m.note = note;
+                        m.progress = Some(f);
+                    })
+                });
+            }
             s.after(1700, move |s| {
                 let now = s.time;
                 s.patch_machine(&id, |m| {
                     m.st = St::Running;
                     m.fresh_at = now;
+                    m.note.clear();
+                    m.progress = None;
                 })
             });
         });
@@ -2817,6 +2885,38 @@ impl State {
         self.send(LCmd::OpenTerminal(id.to_string()));
     }
 
+    /// A login shell in a machine, in your terminal app.
+    pub fn open_machine_shell(&self, id: &str) {
+        self.send(LCmd::MachineShell(id.to_string()));
+    }
+
+    /// A machine's details: address, URL, user, disk and memory.
+    pub fn open_machine_info(&mut self, id: &str) {
+        self.minfo = id.to_string();
+        self.mdetails = None;
+        self.open_ov(Ov::MachineInfo);
+        self.send(LCmd::MachineDetails(id.to_string()));
+    }
+
+    pub fn open_url(&mut self, url: String) {
+        self.urls.push(url);
+    }
+
+    /// Copy text and say so.
+    pub fn copied(&mut self, what: &str) {
+        self.toast_say(format!("Copied {what}"), "", None);
+    }
+
+    /// The terminal app shells open in (its bundle id).
+    pub fn terminal_app(&self) -> &str {
+        self.cfg.get("terminal").map_or(crate::terminal::DEFAULT, String::as_str)
+    }
+
+    pub fn set_terminal(&mut self, app: &str) {
+        self.cfg.insert("terminal".into(), app.to_string());
+        self.send(LCmd::Config("terminal".into(), app.to_string()));
+    }
+
     /// Change an engine setting (saved to `~/.patina/config.json`).
     pub fn set_cfg(&mut self, key: &str, on: bool, needs_restart: bool) {
         self.cfg.insert(key.to_string(), on.to_string());
@@ -3045,7 +3145,6 @@ impl State {
                 self.nets = out;
             }
             live::Ev::Machines(list) => {
-                self.machines_ok = list.is_some();
                 let Some(list) = list else {
                     self.ms.clear();
                     return;
@@ -3066,6 +3165,9 @@ impl State {
                         since: now,
                         born: if self.seen_boxes { now } else { -10.0 },
                         arch: m.arch.clone(),
+                        note: String::new(),
+                        ip: String::new(),
+                        progress: None,
                     });
                     if x.st != st {
                         x.since = now;
@@ -3076,12 +3178,23 @@ impl State {
                     x.st = st;
                     x.distro = m.distro;
                     x.arch = m.arch;
+                    x.up = m.up;
+                    x.ip = m.ip;
                     x.gone = self.pending_a.contains(&x.id);
                     out.push(x);
                 }
                 let keep: Vec<Machine> = self.ms.iter().filter(|m| self.pending_m.contains_key(&m.id) && !out.iter().any(|x| x.id == m.id)).cloned().collect();
                 out.extend(keep);
                 self.ms = out;
+            }
+            live::Ev::MachineStep { id, step, frac } => self.patch_machine(&id, |m| {
+                m.note = step;
+                m.progress = frac;
+            }),
+            live::Ev::MachineDetails { id, details } => {
+                if self.minfo == id {
+                    self.mdetails = Some(details);
+                }
             }
             live::Ev::Kube { enabled, reachable, pods } => {
                 if !self.kube_busy {
@@ -3226,6 +3339,10 @@ impl State {
                     }
                     "mk" => {
                         self.pending_m.remove(&arg);
+                        self.patch_machine(&arg, |m| {
+                            m.note.clear();
+                            m.progress = None;
+                        });
                         if !ok {
                             self.ms.retain(|m| m.id != arg);
                         }
@@ -3499,6 +3616,85 @@ mod tests {
         assert_eq!(s.pal_filtered().len(), View::ALL.len());
         s.pal.q = "backup".into();
         assert!(s.pal_filtered().is_empty());
+    }
+
+    #[test]
+    fn live_machine_creation_shows_its_progress() {
+        let mut s = state("machines", "");
+        s.ms.clear();
+        s.ms.push(Machine {
+            id: "dev".into(),
+            distro: "Ubuntu 24.04 LTS".into(),
+            st: St::Starting,
+            up: String::new(),
+            was: false,
+            gone: false,
+            added: true,
+            fresh_at: -10.0,
+            since: 0.0,
+            born: 0.0,
+            arch: "arm64".into(),
+            note: String::new(),
+            ip: String::new(),
+            progress: None,
+        });
+        s.pending_m.insert("dev".into(), St::Starting);
+        s.apply(live::Ev::MachineStep { id: "dev".into(), step: "Downloading Ubuntu · 4 of 29 MB".into(), frac: Some(0.06) });
+        assert_eq!((s.ms[0].note.as_str(), s.ms[0].progress), ("Downloading Ubuntu · 4 of 29 MB", Some(0.06)));
+        // Not listed yet (its image is still being built): it's kept.
+        s.apply(live::Ev::Machines(Some(vec![])));
+        assert_eq!(s.ms.len(), 1);
+        let snap = |st| live::MachSnap {
+            id: "dev".into(),
+            distro: "Ubuntu 24.04 LTS".into(),
+            st,
+            arch: "arm64".into(),
+            up: "up 2 seconds".into(),
+            ip: "192.168.64.254".into(),
+        };
+        s.apply(live::Ev::Machines(Some(vec![snap(St::Running)])));
+        assert_eq!(s.ms[0].st, St::Starting);
+        s.apply(live::Ev::Done { key: "mk:dev".into(), ok: true, msg: "Created dev".into() });
+        assert!(s.ms[0].note.is_empty() && s.ms[0].progress.is_none());
+        assert_eq!(s.toast.as_ref().unwrap().msg, "Created dev");
+        s.apply(live::Ev::Machines(Some(vec![snap(St::Running)])));
+        assert_eq!((s.ms[0].st, s.ms[0].up.as_str(), s.ms[0].ip.as_str()), (St::Running, "up 2 seconds", "192.168.64.254"));
+        // Its details arrive for the dialog that asked.
+        s.open_machine_info("dev");
+        assert_eq!(s.ov, Some(Ov::MachineInfo));
+        let details = crate::engine::machines::Details { disk_mb: 120.0, mem_mb: Some(16.0), created: Some(0) };
+        s.apply(live::Ev::MachineDetails { id: "other".into(), details: details.clone() });
+        assert!(s.mdetails.is_none());
+        s.apply(live::Ev::MachineDetails { id: "dev".into(), details: details.clone() });
+        assert_eq!(s.mdetails, Some(details));
+        // The engine went down.
+        s.apply(live::Ev::Machines(None));
+        assert!(s.ms.is_empty());
+    }
+
+    #[test]
+    fn new_machines_get_a_free_default_name() {
+        let mut s = state("machines", "");
+        // The demo has ubuntu and debian.
+        s.open_mk();
+        assert_eq!(s.default_machine_name(), "ubuntu-2");
+        s.mk.pick = 2;
+        assert_eq!(s.default_machine_name(), "fedora");
+        s.mk.pick = 0;
+        s.make_machine();
+        run_for(&mut s, 1.0);
+        assert!(s.ms.iter().any(|m| m.id == "ubuntu-2"));
+        // A typed name is cleaned up, and numbered when it's taken.
+        s.open_mk();
+        s.mk.name = "  My Box! ".into();
+        s.make_machine();
+        run_for(&mut s, 1.0);
+        assert!(s.ms.iter().any(|m| m.id == "my-box"));
+        s.open_mk();
+        s.mk.name = "debian".into();
+        s.make_machine();
+        run_for(&mut s, 1.0);
+        assert!(s.ms.iter().any(|m| m.id == "debian-2"));
     }
 
     #[test]

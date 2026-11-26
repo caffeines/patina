@@ -25,6 +25,7 @@ pub const BACK: &str = "M9.8 3.5L5.3 8l4.5 4.5";
 pub const DOWN: &str = "M8 3v9.5M4 8.5l4 4 4-4";
 pub const SCALE: &str = "M8 2.5v11M5.2 5.3L8 2.5l2.8 2.8M5.2 10.7L8 13.5l2.8-2.8";
 pub const EXPAND: &str = "M9.5 2.5h4v4M13.5 2.5L9 7M6.5 13.5h-4v-4M2.5 13.5L7 9";
+pub const INFO: &str = "M8 2.2a5.8 5.8 0 1 0 0 11.6A5.8 5.8 0 0 0 8 2.2zM8 7.2v4M8 4.9v.1";
 pub const TRASH: &str = "M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.8 7v3.5M9.2 7v3.5";
 
 pub fn nav(view: crate::sim::View) -> &'static str {

@@ -16,6 +16,8 @@ enum Ctl {
     Text(String),
     Code(String),
     Update,
+    /// The terminal app shells open in, from those on this Mac.
+    Terminal,
 }
 
 struct RowDef {
@@ -100,6 +102,7 @@ fn live_rows(s: &State) -> Vec<RowDef> {
                 "Puts ~/.patina/bin first in new terminals, through one line in your shell profile.",
                 Ctl::Cfg("shell_path", false),
             ),
+            row("Terminal", "Where Open in Terminal opens shells, for containers and machines.", Ctl::Terminal),
         ],
         Pane::Resources => {
             let cores = host_cpus().max(s.saved.0).max(1);
@@ -205,6 +208,19 @@ pub fn show(ui: &mut Ui, cx: &mut Cx) {
                 let cr = Rect::from_min_size(pos2(x, top + block_h + 12.0), vec2(right - x, cg.size().y + 28.0));
                 w::fill(&p, cr, 10.0, TERM);
                 p.galley(pos2(cr.left() + 16.0, cr.top() + 14.0), cg, CODE);
+            }
+            Ctl::Terminal => {
+                let apps = crate::terminal::installed();
+                let labels: Vec<&str> = apps.iter().map(|a| a.1).collect();
+                let cur = apps.iter().position(|a| a.0 == cx.s.terminal_app()).unwrap_or(0);
+                let sw = (labels.len() as f32 * 78.0).min(right - x - 200.0).max(100.0);
+                let r = Rect::from_min_size(pos2(right - sw, cy - 17.0), vec2(sw, 34.0));
+                if let Some(i) = w::segmented(&mut sui, cx.tw, r, id, &labels, cur) {
+                    if i != cur {
+                        let app = apps[i].0;
+                        cx.fx.push(Box::new(move |s| s.set_terminal(app)));
+                    }
+                }
             }
             Ctl::Update => {
                 let checking = cx.s.upd == Upd::Checking;

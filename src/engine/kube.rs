@@ -33,6 +33,11 @@ pub const API_PORT: u16 = 6443;
 /// Run `script` with `sh` as root inside the VM. Returns its output, or
 /// the last thing it printed when it fails.
 pub async fn in_vm(d: &Docker, script: &str) -> Result<String, String> {
+    in_vm_follow(d, script, &mut |_| {}).await
+}
+
+/// [`in_vm`], handing each line it prints to `line` as it's printed.
+pub async fn in_vm_follow(d: &Docker, script: &str, line: &mut (dyn FnMut(&str) + Send)) -> Result<String, String> {
     if d.inspect_image(HELPER).await.is_err() {
         let (img, tag) = HELPER.split_once(':').unwrap_or((HELPER, "latest"));
         let mut pull = d.create_image(Some(CreateImageOptionsBuilder::new().from_image(img).tag(tag).build()), None, None);
@@ -49,13 +54,36 @@ pub async fn in_vm(d: &Docker, script: &str) -> Result<String, String> {
         ..Default::default()
     };
     let id = d.create_container(None::<bollard::query_parameters::CreateContainerOptions>, body).await.map_err(|e| e.to_string())?.id;
-    let r = run_helper(d, &id).await;
+    let r = run_follow(d, &id, line).await;
     let _ = d.remove_container(&id, Some(RemoveContainerOptions { force: true, ..Default::default() })).await;
     r
 }
 
-async fn run_helper(d: &Docker, id: &str) -> Result<String, String> {
+/// Start a container and follow its output to the end, handing each line
+/// (split at newlines and carriage returns) to `line`. Returns the output,
+/// or the last thing it printed when it fails.
+pub(super) async fn run_follow(d: &Docker, id: &str, line: &mut (dyn FnMut(&str) + Send)) -> Result<String, String> {
     d.start_container(id, None).await.map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    let mut part = String::new();
+    let mut logs = d.logs(id, Some(LogsOptionsBuilder::new().stdout(true).stderr(true).follow(true).build()));
+    while let Some(Ok(chunk)) = logs.next().await {
+        let s = String::from_utf8_lossy(&chunk.into_bytes()).to_string();
+        text.push_str(&s);
+        for c in s.chars() {
+            if c == '\n' || c == '\r' {
+                if !part.trim().is_empty() {
+                    line(part.trim());
+                }
+                part.clear();
+            } else {
+                part.push(c);
+            }
+        }
+    }
+    if !part.trim().is_empty() {
+        line(part.trim());
+    }
     let mut code = 0;
     let mut wait = d.wait_container(id, None);
     while let Some(r) = wait.next().await {
@@ -65,16 +93,11 @@ async fn run_helper(d: &Docker, id: &str) -> Result<String, String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-    let mut text = String::new();
-    let mut logs = d.logs(id, Some(LogsOptionsBuilder::new().stdout(true).stderr(true).build()));
-    while let Some(Ok(chunk)) = logs.next().await {
-        text.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
-    }
     if code == 0 {
         Ok(text)
     } else {
         let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        Err(if last.is_empty() { format!("The script in the VM failed with code {code}.") } else { last.to_string() })
+        Err(if last.is_empty() { format!("The script failed with code {code}.") } else { last.to_string() })
     }
 }
 

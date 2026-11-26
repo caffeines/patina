@@ -3,7 +3,7 @@
 use egui::text::{LayoutJob, TextFormat};
 use egui::{pos2, vec2, Align, Align2, Context, CursorIcon, Frame, Id, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, ViewportCommand};
 
-use super::{assets, builds, containers, enter, kube, logs, machines, settings, swap, Cx};
+use super::{assets, builds, containers, dashboard, enter, kube, logs, machines, settings, swap, Cx};
 use crate::icons::{self, Ink};
 use crate::sim::{fmt_count, fmt_size, Banner, Engine, Filter, Job, KTab, Kube, ModalKind, Pane, St, State, View};
 use crate::theme::*;
@@ -110,7 +110,7 @@ fn banner(ui: &mut Ui, cx: &mut Cx) {
     if yr.clicked() {
         cx.fx.push(match b {
             Banner::Update => Box::new(|s: &mut State| s.apply_update()),
-            Banner::Disk => Box::new(|s: &mut State| s.ask_modal(ModalKind::Prune, "")),
+            Banner::Disk => Box::new(|s: &mut State| s.open_cleanup()),
             Banner::Stale => Box::new(|s: &mut State| {
                 s.banner = None;
                 s.reboot();
@@ -124,6 +124,7 @@ fn banner(ui: &mut Ui, cx: &mut Cx) {
 
 fn chrome(view: View) -> (&'static str, Option<&'static str>) {
     match view {
+        View::Dashboard => ("Dashboard", None),
         View::Containers => ("Containers", Some("Run image")),
         View::Images => ("Images", Some("Pull image")),
         View::Volumes => ("Volumes", Some("Create volume")),
@@ -167,11 +168,11 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx) {
         }
         right = r.left() - 12.0;
     }
-    // Secondary: prune
-    if view == View::Images && live && !cx.s.spare_images().is_empty() {
-        let (resp, _) = Btn::ghost("Prune unused").at_right(ui, right, cy, Id::new("prune"));
+    // Secondary: clean up what nothing uses
+    if matches!(view, View::Dashboard | View::Images | View::Volumes) && live {
+        let (resp, _) = Btn::ghost("Clean up").at_right(ui, right, cy, Id::new("prune"));
         if resp.clicked() {
-            cx.fx.push(Box::new(|s| s.ask_modal(ModalKind::Prune, "")));
+            cx.fx.push(Box::new(|s| s.open_cleanup()));
         }
     }
 
@@ -242,6 +243,17 @@ fn summary(s: &State, view: View) -> String {
     }
     let tally = |st: St| s.alive().filter(|c| c.st == st).count();
     match view {
+        View::Dashboard => {
+            let mut parts = vec![format!("{} running", fmt_count(tally(St::Running), "container"))];
+            if let Some(u) = s.disk() {
+                parts.push(format!("{} on disk", crate::engine::cleanup::fmt_bytes(u.total())));
+                let free = u.reclaimable();
+                if free > 0.0 {
+                    parts.push(format!("{} reclaimable", crate::engine::cleanup::fmt_bytes(free)));
+                }
+            }
+            parts.join(" · ")
+        }
         View::Containers => {
             let mut parts = vec![
                 format!("{} running", tally(St::Running)),
@@ -525,6 +537,7 @@ fn content(ui: &mut Ui, cx: &mut Cx) {
         return;
     }
     match view {
+        View::Dashboard => dashboard::show(ui, cx),
         View::Containers => containers::show(ui, cx),
         View::Images | View::Volumes | View::Networks => assets::show(ui, cx),
         View::Builds if cx.s.is_live() && !cx.s.builds_seen => skeleton(ui, cx),

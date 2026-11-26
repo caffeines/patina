@@ -48,7 +48,7 @@ VIEW OPTIONS:
 DEMO OPTIONS (imply --demo):
     --scenario <name>   default | empty | loading | stopped | failed | trouble | update | diskfull | offline
     --show <name>       run | menu | delete | toast | palette | pull | blocked | prune | volume | machine
-                        | machineinfo | creating | logs | buildlog | kubescale | kubedelete
+                        | machineinfo | creating | cleanup | logs | buildlog | kubescale | kubedelete
     --phase <name>      invalid | conflict | busy | nomatch | on | dirty
 ";
 

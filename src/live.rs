@@ -67,6 +67,10 @@ pub enum Cmd {
     MachineShell(String),
     /// Read a machine's disk and memory use for its details.
     MachineDetails(String),
+    /// Read disk usage now (the dashboard or Clean up opened).
+    Usage,
+    /// Clean up what's chosen.
+    Clean(engine::cleanup::Sel),
     Kube(bool),
     KubeReset,
     Config(String, String),
@@ -152,6 +156,8 @@ pub enum Ev {
     /// What a machine being created is doing ("Downloading Ubuntu · 18 of
     /// 29 MB") and how far along it is.
     MachineStep { id: String, step: String, frac: Option<f32> },
+    /// What takes up the engine's disk, and what's unused.
+    Usage(engine::cleanup::Usage),
     MachineDetails { id: String, details: engine::machines::Details },
     Kube { enabled: bool, reachable: bool, pods: Vec<PodSnap> },
     /// What the cluster's API reports: workloads, services, storage,
@@ -999,23 +1005,22 @@ impl W {
         }
         let (d, out, sizes, busy) = (d.clone(), self.out.clone(), self.vol_sizes.clone(), self.df_busy.clone());
         tokio::spawn(async move {
-            if let Ok(df) = d.df(None).await {
-                let sum = |x: Option<i64>| x.unwrap_or(0).max(0) as f64;
-                let total = (sum(df.image_usage.as_ref().and_then(|u| u.total_size))
-                    + sum(df.container_usage.as_ref().and_then(|u| u.total_size))
-                    + sum(df.volume_usage.as_ref().and_then(|u| u.total_size)))
-                    / 1e9;
-                if let Ok(mut map) = sizes.lock() {
-                    for v in df.volume_usage.and_then(|u| u.items).unwrap_or_default() {
-                        if let (Some(n), Some(sz)) = (v["Name"].as_str(), v["UsageData"]["Size"].as_i64()) {
-                            if sz >= 0 {
-                                map.insert(n.to_string(), sz as f64 / 1e6);
-                            }
+            match engine::cleanup::usage(&d).await {
+                Ok(u) => {
+                    if let Ok(mut map) = sizes.lock() {
+                        for (n, b) in &u.volume_bytes {
+                            map.insert(n.clone(), b / 1e6);
                         }
                     }
+                    out.send(Ev::Disk(u.total() / 1e9));
+                    out.send(Ev::Usage(u));
+                    out.refresh();
                 }
-                out.send(Ev::Disk(total));
-                out.refresh();
+                Err(e) => {
+                    if std::env::var_os("PATINA_DEBUG").is_some() {
+                        eprintln!("[patina] disk usage: {e}");
+                    }
+                }
             }
             busy.store(false, Ordering::SeqCst);
         });
@@ -1267,6 +1272,20 @@ impl W {
                 if engine::machines::valid_name(&n) {
                     terminal(engine::machines::shell_args(&n), out);
                 }
+            }
+            Cmd::Usage => {
+                if let Some(d) = self.docker.clone() {
+                    self.df(&d);
+                }
+            }
+            Cmd::Clean(sel) => {
+                let Some(d) = self.need_docker("clean") else { return };
+                let refresh = self.out.clone();
+                tokio::spawn(async move {
+                    let r = engine::cleanup::clean(&d, sel).await;
+                    out.done("clean", r);
+                    let _ = refresh.cmd.send(Cmd::Usage);
+                });
             }
             Cmd::MachineDetails(n) => {
                 let Some(d) = self.docker.clone() else { return };

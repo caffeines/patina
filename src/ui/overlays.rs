@@ -35,6 +35,7 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
                 Ov::Run => run(ui, cx, screen, pa, pdy, enter),
                 Ov::Machine => machine(ui, cx, screen, pa, pdy, enter),
                 Ov::MachineInfo => machine_info(ui, cx, screen, pa, pdy, enter),
+                Ov::Cleanup => cleanup(ui, cx, screen, pa, pdy, enter),
                 Ov::Palette => {
                     if bg.clicked() {
                         cx.fx.push(Box::new(|s| s.close_ov()));
@@ -402,6 +403,107 @@ fn machine_info(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter
             s.open_machine_shell(&id);
             s.close_ov();
         }));
+    }
+}
+
+/// One kind of thing Clean up can remove.
+struct CleanRow {
+    title: &'static str,
+    body: &'static str,
+    tick: fn(&mut crate::sim::Sel) -> &mut bool,
+    /// Count and bytes (bytes < 0: count only).
+    what: fn(&crate::sim::Usage) -> (usize, f64),
+    danger: bool,
+}
+
+const CLEAN_ROWS: [CleanRow; 7] = [
+    CleanRow { title: "Dangling images", body: "Untagged leftovers from builds and pulls.", tick: |s| &mut s.dangling, what: |u| (u.dangling.n, u.dangling.bytes), danger: false },
+    CleanRow { title: "Unused images", body: "Images no container uses. They're pulled again when needed.", tick: |s| &mut s.images, what: |u| (u.images_unused.n, u.images_unused.bytes), danger: false },
+    CleanRow {
+        title: "Unused machine images",
+        body: "Distros no machine uses. The next machine of one sets it up again.",
+        tick: |s| &mut s.distros,
+        what: |u| (u.distros_unused.n, u.distros_unused.bytes),
+        danger: false,
+    },
+    CleanRow { title: "Build cache", body: "Layers kept to speed up docker build.", tick: |s| &mut s.cache, what: |u| (u.cache_unused.n, u.cache_unused.bytes), danger: false },
+    CleanRow { title: "Unused networks", body: "Networks no container is on.", tick: |s| &mut s.networks, what: |u| (u.networks_unused, -1.0), danger: false },
+    CleanRow {
+        title: "Stopped containers",
+        body: "Containers that aren't running. Machines and pods stay.",
+        tick: |s| &mut s.stopped,
+        what: |u| (u.stopped.n, u.stopped.bytes),
+        danger: false,
+    },
+    CleanRow { title: "Unused volumes", body: "Volumes no container uses. Their data is deleted.", tick: |s| &mut s.volumes, what: |u| (u.volumes_unused.n, u.volumes_unused.bytes), danger: true },
+];
+
+fn cleanup(ui: &mut Ui, cx: &mut Cx, screen: Rect, pa: f32, pdy: f32, enter: bool) {
+    use crate::engine::cleanup::fmt_bytes;
+    let wd = 540.0f32.min(screen.width() - 48.0);
+    let iw = wd - 48.0;
+    let (tg, bg) = title_block(ui, "Clean up", "Removes what nothing uses, to free disk space. Anything a container or machine uses stays.", iw);
+    let row_h = 54.0;
+    let h = 24.0 + tg.size().y + 6.0 + bg.size().y + 14.0 + CLEAN_ROWS.len() as f32 * row_h + 18.0 + 34.0 + 24.0;
+    let rect = Rect::from_center_size(screen.center() + vec2(0.0, pdy), vec2(wd, h));
+    let mut dui = dialog(ui, rect, pa);
+    let p = dui.painter().clone();
+    let x = rect.left() + 24.0;
+    let right = rect.right() - 24.0;
+    let mut y = rect.top() + 24.0;
+    p.galley(pos2(x, y), tg.clone(), TEXT);
+    y += tg.size().y + 6.0;
+    p.galley(pos2(x, y), bg.clone(), TEXT2);
+    y += bg.size().y + 14.0;
+
+    let u = cx.s.disk();
+    let busy = cx.s.clean.busy;
+    let mut sel = cx.s.clean.sel;
+    for (i, row) in CLEAN_ROWS.iter().enumerate() {
+        if i > 0 {
+            p.line_segment([pos2(x, y + 0.5), pos2(right, y + 0.5)], Stroke::new(1.0_f32, HAIRLINE));
+        }
+        let cy = y + row_h / 2.0;
+        let on = *(row.tick)(&mut sel);
+        let sw = Rect::from_min_size(pos2(right - 40.0, cy - 12.0), vec2(40.0, 24.0));
+        let tint = if row.danger && on { DANGER } else { VERDIGRIS };
+        if w::switch(&mut dui, cx.tw, sw, Id::new(("clean", i)), on, if on { tint } else { SWITCH_OFF }).clicked() && !busy {
+            let tick = row.tick;
+            cx.fx.push(Box::new(move |s| s.tick_clean(|sel| *tick(sel) = !*tick(sel))));
+        }
+        let amount = match &u {
+            None => "…".to_string(),
+            Some(u) => {
+                let (n, b) = (row.what)(u);
+                if n == 0 && b <= 0.0 {
+                    "none".to_string()
+                } else if b < 0.0 {
+                    n.to_string()
+                } else {
+                    format!("{n} · {}", fmt_bytes(b))
+                }
+            }
+        };
+        let ar = w::text_right(&p, &dui, sw.left() - 14.0, cy, &amount, mono(12.0), if on { TEXT } else { MUTED });
+        w::text(&p, &dui, x, cy - 9.0, row.title, medium(13.5), TEXT);
+        let body_c = if row.danger && on { DANGER_TEXT } else { MUTED };
+        let g = w::g_elide(&dui, row.body, sans(12.5), body_c, ar.left() - 14.0 - x);
+        w::put(&p, &g, pos2(x, cy + 10.0), Align2::LEFT_CENTER);
+        y += row_h;
+    }
+    y += 18.0;
+
+    let free = u.as_ref().map(|u| u.freeable(&sel)).unwrap_or(0.0);
+    let note = if u.is_none() { "Reading disk usage".to_string() } else { format!("Frees up to {}", fmt_bytes(free)) };
+    w::text(&p, &dui, x, y + 17.0, &note, sans(13.5), TEXT2);
+    let danger = sel.volumes;
+    let yes = Btn::cta(if busy { "Cleaning up" } else { "Clean up" }).spin(busy).tone(if danger { DANGER } else { COPPER }).enabled(sel.any() && !busy);
+    if busy {
+        cx.ambient = true;
+    }
+    let (go, _) = buttons(&mut dui, cx, right, y + 17.0, "Cancel", yes);
+    if (go || (enter && sel.any())) && !cx.s.ov_out && !busy {
+        cx.fx.push(Box::new(|s| s.run_cleanup()));
     }
 }
 

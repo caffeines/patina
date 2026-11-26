@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use egui::{Color32, Rect, Ui};
 
+pub const DASHBOARD: &str = "M2.6 2.6h4.2v5.2H2.6zM9.2 2.6h4.2v3H9.2zM9.2 7.8h4.2v5.6H9.2zM2.6 10.2h4.2v3.2H2.6z";
 pub const CONTAINERS: &str = "M8 1.8l5.5 3.1v6.2L8 14.2l-5.5-3.1V4.9zM2.5 4.9L8 8l5.5-3.1M8 8v6.2";
 pub const IMAGES: &str = "M8 2l6 3.2-6 3.2-6-3.2zM2 8l6 3.2L14 8M2 10.8L8 14l6-3.2";
 pub const VOLUMES: &str = "M3 4.2c0-1.2 2.2-2.2 5-2.2s5 1 5 2.2-2.2 2.2-5 2.2-5-1-5-2.2zM3 4.2v7.6c0 1.2 2.2 2.2 5 2.2s5-1 5-2.2V4.2M3 8c0 1.2 2.2 2.2 5 2.2s5-1 5-2.2";
@@ -31,6 +32,7 @@ pub const TRASH: &str = "M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M6.
 pub fn nav(view: crate::sim::View) -> &'static str {
     use crate::sim::View::*;
     match view {
+        Dashboard => DASHBOARD,
         Containers => CONTAINERS,
         Images => IMAGES,
         Volumes => VOLUMES,

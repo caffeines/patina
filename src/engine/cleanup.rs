@@ -129,6 +129,9 @@ impl Sel {
     pub fn all() -> Sel {
         Sel { stopped: true, dangling: true, images: true, distros: true, cache: true, networks: true, volumes: true }
     }
+    pub fn any(&self) -> bool {
+        self.stopped || self.dangling || self.images || self.distros || self.cache || self.networks || self.volumes
+    }
 }
 
 impl Default for Sel {

@@ -186,6 +186,17 @@ later.
 
 ## What works
 
+- **Dashboard:** what's on the engine at a glance. Disk use split by kind (images, containers,
+  machines, volumes, build cache) with what's unused and reclaimable, and the disk image macOS
+  allocated; the engine's status, memory and switches; counts of containers, images, volumes,
+  networks, machines and pods, each opening its view; CPU and memory of all containers over the
+  last minute; the busiest containers; the biggest images and volumes; and links to open ports
+  and machines.
+- **Clean up:** from the dashboard, Images or Volumes. Choose what goes, with each kind's count
+  and size: dangling images, unused images, unused machine images (distros no machine uses),
+  build cache, unused networks, stopped containers and unused volumes. Machines and Kubernetes'
+  pods are never touched, and stopped containers and volumes are left unticked.
+
 - **Containers:** grouped by Compose project, with live CPU sparklines, real logs, and real exit
   reasons (out of memory, exit codes, health checks). Start, stop, pause, restart and delete.
   Run image (pulls when needed, with port mapping), open in browser, and open a terminal
@@ -231,6 +242,7 @@ cargo run -- --help                        # every option
 | `src/engine/control.rs` | The app's side: start, stop, status |
 | `src/engine/machines.rs` | Linux machines: base images, setup, addresses, create, start, stop |
 | `src/engine/cleanup.rs` | Disk usage by kind, and Clean up |
+| `src/ui/dashboard.rs` | The dashboard |
 | `src/engine/mdns.rs` | `<machine>.patina.local` names on this Mac (mDNSResponder, local only) |
 | `src/terminal.rs` | Opening shells in your terminal app |
 | `src/engine/kube.rs` | Kubernetes with k3s, and running scripts in the VM |

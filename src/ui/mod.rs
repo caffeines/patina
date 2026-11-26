@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod builds;
 pub mod containers;
+pub mod dashboard;
 pub mod kube;
 pub mod logs;
 pub mod machines;

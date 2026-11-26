@@ -50,6 +50,7 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
             // Navigation
             let s = &*cx.s;
             let counts = [
+                None,
                 Some(s.alive().count()),
                 Some(s.imgs.iter().filter(|a| !a.gone).count()),
                 Some(s.vols.iter().filter(|a| !a.gone).count()),

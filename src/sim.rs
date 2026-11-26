@@ -24,6 +24,7 @@ pub enum St {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
+    Dashboard,
     Containers,
     Images,
     Volumes,
@@ -35,11 +36,21 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 8] =
-        [View::Containers, View::Images, View::Volumes, View::Networks, View::Builds, View::Machines, View::Kubernetes, View::Settings];
+    pub const ALL: [View; 9] = [
+        View::Dashboard,
+        View::Containers,
+        View::Images,
+        View::Volumes,
+        View::Networks,
+        View::Builds,
+        View::Machines,
+        View::Kubernetes,
+        View::Settings,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            View::Dashboard => "Dashboard",
             View::Containers => "Containers",
             View::Images => "Images",
             View::Volumes => "Volumes",
@@ -53,6 +64,7 @@ impl View {
 
     pub fn slug(self) -> &'static str {
         match self {
+            View::Dashboard => "dashboard",
             View::Containers => "containers",
             View::Images => "images",
             View::Volumes => "volumes",
@@ -227,6 +239,8 @@ pub enum Ov {
     Machine,
     /// A machine's details: `State::minfo`.
     MachineInfo,
+    /// Clean up what nothing uses.
+    Cleanup,
     Palette,
 }
 
@@ -421,6 +435,17 @@ pub struct RunForm {
     pub perr: String,
     pub busy: bool,
 }
+
+/// The Clean up dialog: what's ticked, and whether it's running.
+#[derive(Clone, Debug, Default)]
+pub struct CleanForm {
+    pub sel: Sel,
+    pub busy: bool,
+    /// Ticks were changed by hand; fresh numbers don't reset them.
+    pub touched: bool,
+}
+
+pub use crate::engine::cleanup::{Part, Sel, Usage};
 
 #[derive(Clone, Debug, Default)]
 pub struct MkForm {
@@ -767,6 +792,14 @@ pub struct State {
     /// The machine the details dialog shows, and what the engine reported for it.
     pub minfo: String,
     pub mdetails: Option<crate::engine::machines::Details>,
+    /// What takes up the engine's disk (live), and the Clean up dialog.
+    pub usage: Option<Usage>,
+    pub clean: CleanForm,
+    /// CPU (% of one core) and memory (MB) of all containers, once a second,
+    /// for the dashboard; the newest last.
+    pub cpu_hist: Vec<f32>,
+    pub mem_hist: Vec<f32>,
+    pub hist_at: f64,
     pub pal: Pal,
     pub menu: Option<String>,
     pub menu_at: f64,
@@ -895,6 +928,11 @@ impl State {
             mk: MkForm::default(),
             minfo: String::new(),
             mdetails: None,
+            usage: None,
+            clean: CleanForm::default(),
+            cpu_hist: Vec::new(),
+            mem_hist: Vec::new(),
+            hist_at: -10.0,
             pal: Pal::default(),
             menu: None,
             menu_at: now,
@@ -1133,6 +1171,10 @@ impl State {
                 s.view = View::Images;
                 s.ask_modal(ModalKind::Prune, "");
             }
+            "cleanup" => {
+                s.view = View::Dashboard;
+                s.open_cleanup();
+            }
             "creating" => {
                 s.view = View::Machines;
                 let mut m = s.ms[0].clone();
@@ -1359,6 +1401,7 @@ impl State {
     /// Advance the simulation to `now`: fire due timers and the 1.1 s pulse.
     pub fn tick(&mut self, now: f64) {
         self.time = now;
+        self.sample();
         if let Some(live) = &self.live {
             for ev in live.drain() {
                 self.apply(ev);
@@ -1524,6 +1567,9 @@ impl State {
             self.view_at = self.time;
             self.q.clear();
             self.menu = None;
+            if view == View::Dashboard {
+                self.send(LCmd::Usage);
+            }
         }
     }
 
@@ -2144,6 +2190,122 @@ impl State {
         self.toast_say(format!("Created {id}"), "", None);
     }
 
+    /// Open Clean up, with fresh numbers on the way.
+    pub fn open_cleanup(&mut self) {
+        self.clean = CleanForm::default();
+        self.open_ov(Ov::Cleanup);
+        self.send(LCmd::Usage);
+    }
+
+    pub fn tick_clean(&mut self, f: impl FnOnce(&mut Sel)) {
+        f(&mut self.clean.sel);
+        self.clean.touched = true;
+    }
+
+    /// Run Clean up. The demo removes its unused images.
+    pub fn run_cleanup(&mut self) {
+        if self.clean.busy || !self.clean.sel.any() {
+            return;
+        }
+        self.clean.busy = true;
+        if self.live.is_some() {
+            self.send(LCmd::Clean(self.clean.sel));
+            return;
+        }
+        let sel = self.clean.sel;
+        self.after(1200, move |s| {
+            let freed = s.demo_usage().freeable(&sel);
+            if sel.images || sel.dangling {
+                let spare: Vec<String> = s.spare_images().iter().map(|a| a.n.clone()).collect();
+                s.imgs.retain(|a| !spare.contains(&a.n));
+            }
+            if sel.volumes {
+                s.vols.retain(|a| !a.used_by.is_empty());
+            }
+            s.clean.busy = false;
+            s.close_ov();
+            s.toast_say(format!("Freed {}", crate::engine::cleanup::fmt_bytes(freed)), "", None);
+        });
+    }
+
+    /// What the dashboard and Clean up show: the engine's numbers, or ones
+    /// worked out from the demo's containers, images and volumes.
+    pub fn disk(&self) -> Option<Usage> {
+        if self.live.is_some() {
+            return self.usage.clone();
+        }
+        Some(self.demo_usage())
+    }
+
+    fn demo_usage(&self) -> Usage {
+        let mb = 1e6;
+        let mut u = Usage::default();
+        for a in self.imgs.iter().filter(|a| !a.gone) {
+            u.images.n += 1;
+            u.images.bytes += a.mb * mb;
+            if a.used_by.is_empty() {
+                u.images_unused.n += 1;
+                u.images_unused.bytes += a.mb * mb;
+            }
+            u.biggest_images.push(crate::engine::cleanup::Item { name: a.n.clone(), bytes: a.mb * mb, used: !a.used_by.is_empty() });
+        }
+        u.biggest_images.sort_by(|a, b| b.bytes.total_cmp(&a.bytes));
+        u.biggest_images.truncate(6);
+        for v in self.vols.iter().filter(|a| !a.gone) {
+            u.volumes.n += 1;
+            u.volumes.bytes += v.mb * mb;
+            if v.used_by.is_empty() {
+                u.volumes_unused.n += 1;
+                u.volumes_unused.bytes += v.mb * mb;
+            }
+            u.biggest_volumes.push(crate::engine::cleanup::Item { name: v.n.clone(), bytes: v.mb * mb, used: !v.used_by.is_empty() });
+        }
+        u.biggest_volumes.sort_by(|a, b| b.bytes.total_cmp(&a.bytes));
+        u.biggest_volumes.truncate(6);
+        for c in self.alive() {
+            u.containers.n += 1;
+            u.containers.bytes += 4.0 * mb;
+            if c.st == St::Running {
+                u.running += 1;
+            } else {
+                u.stopped.n += 1;
+                u.stopped.bytes += 4.0 * mb;
+            }
+        }
+        let ms = self.ms.iter().filter(|m| !m.gone).count();
+        u.machines = Part { n: ms, bytes: ms as f64 * 310.0 * mb };
+        u.distros = Part { n: ms, bytes: ms as f64 * 150.0 * mb };
+        u.dangling = Part { n: 3, bytes: 96.0 * mb };
+        u.cache = Part { n: 42, bytes: 1840.0 * mb };
+        u.cache_unused = Part { n: 30, bytes: 1210.0 * mb };
+        u.networks = self.nets.iter().filter(|n| !n.sys && !n.gone).count();
+        u.networks_unused = self.nets.iter().filter(|n| !n.sys && !n.gone && n.attached == Some(0)).count();
+        u
+    }
+
+    /// Note the containers' CPU and memory, once a second, whatever view is
+    /// open, so the dashboard's last minute has no gaps.
+    pub fn sample(&mut self) {
+        if self.time - self.hist_at < 1.0 {
+            return;
+        }
+        let (waiting, cpu, mem) =
+            self.alive().filter(|c| c.st == St::Running).fold((false, 0.0, 0.0), |a, c| (a.0 || c.mem == 0.0, a.1 + c.cpu, a.2 + c.mem));
+        // Not until every running container's first stats are in, or the
+        // chart starts with a false climb.
+        if self.cpu_hist.is_empty() && waiting {
+            return;
+        }
+        self.hist_at = self.time;
+        let (cpu, mem) = (cpu as f32, mem as f32);
+        for (h, v) in [(&mut self.cpu_hist, cpu), (&mut self.mem_hist, mem)] {
+            h.push(v);
+            if h.len() > 60 {
+                h.remove(0);
+            }
+        }
+    }
+
     pub fn spare_images(&self) -> Vec<&Asset> {
         self.imgs.iter().filter(|a| !a.gone && !self.alive().any(|c| c.id == a.used_by)).collect()
     }
@@ -2622,6 +2784,7 @@ impl State {
                 }),
             });
         }
+        list.push(Cmd { label: "Clean up unused images, cache and more".into(), hint: "Disk", run: Box::new(|s: &mut State| s.open_cleanup()) });
         for v in View::ALL {
             list.push(Cmd { label: format!("Go to {}", v.label()), hint: "Page", run: Box::new(move |s: &mut State| s.go_view(v)) });
         }
@@ -2849,7 +3012,9 @@ impl State {
     /// A state wired to the real engine. It starts empty and fills in as
     /// the backend reports.
     pub fn new_live(handle: live::Handle, nav: Preset, now: f64) -> State {
-        let mut s = State::new(Preset { scenario: "empty".into(), view: nav.view, pane: nav.pane, ..Default::default() }, now);
+        // Patina opens to the dashboard unless asked for another view.
+        let view = if nav.view.is_empty() { "dashboard".to_string() } else { nav.view };
+        let mut s = State::new(Preset { scenario: "empty".into(), view, pane: nav.pane, ..Default::default() }, now);
         s.nets.clear();
         s.pods.clear();
         s.sel.clear();
@@ -3191,6 +3356,12 @@ impl State {
                 m.note = step;
                 m.progress = frac;
             }),
+            live::Ev::Usage(u) => {
+                self.usage = Some(u);
+                if self.ov == Some(Ov::Cleanup) && !self.clean.busy && !self.clean.touched {
+                    self.clean.sel = Sel::default();
+                }
+            }
             live::Ev::MachineDetails { id, details } => {
                 if self.minfo == id {
                     self.mdetails = Some(details);
@@ -3345,6 +3516,13 @@ impl State {
                         });
                         if !ok {
                             self.ms.retain(|m| m.id != arg);
+                        }
+                        self.toast_say(msg, "", None);
+                    }
+                    "clean" => {
+                        self.clean.busy = false;
+                        if ok && self.ov == Some(Ov::Cleanup) {
+                            self.close_ov();
                         }
                         self.toast_say(msg, "", None);
                     }
@@ -3613,7 +3791,10 @@ mod tests {
     fn palette_filters_commands() {
         let mut s = state("", "");
         s.pal.q = "go to".into();
-        assert_eq!(s.pal_filtered().len(), View::ALL.len());
+        // The palette shows eight at most.
+        assert_eq!(s.pal_filtered().len(), View::ALL.len().min(8));
+        s.pal.q = "clean".into();
+        assert_eq!(s.pal_filtered().len(), 1);
         s.pal.q = "backup".into();
         assert!(s.pal_filtered().is_empty());
     }
@@ -3670,6 +3851,36 @@ mod tests {
         // The engine went down.
         s.apply(live::Ev::Machines(None));
         assert!(s.ms.is_empty());
+    }
+
+    #[test]
+    fn cleans_up_unused_images_in_the_demo() {
+        let mut s = state("dashboard", "");
+        let u = s.disk().unwrap();
+        assert!(u.images_unused.n > 0 && u.reclaimable() > 0.0);
+        s.open_cleanup();
+        assert_eq!(s.ov, Some(Ov::Cleanup));
+        // Volumes and stopped containers start unticked.
+        assert_eq!(s.clean.sel, Sel::default());
+        assert!(!s.clean.sel.volumes && !s.clean.sel.stopped);
+        let spare = s.spare_images().len();
+        assert!(spare > 0);
+        s.run_cleanup();
+        run_for(&mut s, 1.5);
+        assert!(s.spare_images().is_empty());
+        assert!(s.toast.as_ref().unwrap().msg.starts_with("Freed "));
+        assert!(!s.clean.busy && s.ov.is_none());
+    }
+
+    #[test]
+    fn samples_activity_once_a_second() {
+        let mut s = state("dashboard", "");
+        s.sample();
+        s.sample();
+        assert_eq!(s.cpu_hist.len(), 1);
+        run_for(&mut s, 3.0);
+        assert!((3..=4).contains(&s.cpu_hist.len()), "{}", s.cpu_hist.len());
+        assert_eq!(s.cpu_hist.len(), s.mem_hist.len());
     }
 
     #[test]

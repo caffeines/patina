@@ -31,7 +31,8 @@ pub struct Status {
 /// What the engine process can do, bumped whenever that changes, so an
 /// engine left running across an update is noticed and restarted.
 /// 1: forwards the Kubernetes API, reports its revision.
-pub const ENGINE_REV: u32 = 1;
+/// 2: upgrades the guest so `docker run` and `docker exec` output isn't cut off.
+pub const ENGINE_REV: u32 = 2;
 
 /// The running engine is older than this app and lacks what changed since.
 pub fn stale(s: &Status) -> bool {

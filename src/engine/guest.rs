@@ -8,8 +8,19 @@
 //! - `patina-docker` serves `/run/docker.sock` on vsock port 2375.
 //! - `patina-ports` connects vsock port 2376 to a guest TCP port named in
 //!   the first line, which is how published ports reach localhost on the Mac.
+//!
+//! socat runs with a long `-t`: by default it closes a connection half a
+//! second after one side finishes sending, which cut off `docker run` and
+//! `docker exec` output once the docker command had sent all its input.
+//! [`upgrade`] brings VMs set up before that up to date.
 
-use super::{PORT_DOCKER, PORT_FORWARD};
+use bollard::Docker;
+
+use super::{kube, PORT_DOCKER, PORT_FORWARD};
+
+/// How long socat keeps a connection open after one side finishes sending:
+/// long enough for any command's output.
+const HALF_CLOSE: &str = "-t 86400";
 
 /// Single-quote a path for /bin/sh.
 fn sh_quote(s: &str) -> String {
@@ -58,7 +69,7 @@ write_files:
       # First line from the Mac names the port; the rest is the connection.
       read port
       case "$port" in ''|*[!0-9]*) exit 1;; esac
-      exec socat - TCP:127.0.0.1:"$port"
+      exec socat {HALF_CLOSE} - TCP:127.0.0.1:"$port"
   - path: /etc/systemd/system/patina-boot.service
     content: |
       [Unit]
@@ -78,7 +89,8 @@ write_files:
       After=docker.service
       Wants=docker.service
       [Service]
-      ExecStart=/usr/bin/socat VSOCK-LISTEN:{PORT_DOCKER},reuseaddr,fork UNIX-CONNECT:/run/docker.sock
+      KillMode=process
+      ExecStart=/usr/bin/socat {HALF_CLOSE} VSOCK-LISTEN:{PORT_DOCKER},reuseaddr,fork UNIX-CONNECT:/run/docker.sock
       Restart=always
       RestartSec=1
       [Install]
@@ -88,7 +100,8 @@ write_files:
       [Unit]
       Description=Patina port forwarding channel
       [Service]
-      ExecStart=/usr/bin/socat VSOCK-LISTEN:{PORT_FORWARD},reuseaddr,fork EXEC:/usr/local/sbin/patina-port
+      KillMode=process
+      ExecStart=/usr/bin/socat {HALF_CLOSE} VSOCK-LISTEN:{PORT_FORWARD},reuseaddr,fork EXEC:/usr/local/sbin/patina-port
       Restart=always
       RestartSec=1
       [Install]
@@ -111,6 +124,38 @@ runcmd:
     )
 }
 
+/// Bring a VM set up by an older Patina up to date. Each step checks first,
+/// so this does nothing on a current VM. Restarting the channels keeps their
+/// open connections (`KillMode=process`), including this one.
+pub async fn upgrade(d: &Docker) -> Result<bool, String> {
+    let out = kube::in_vm(d, &upgrade_script()).await?;
+    Ok(out.contains("upgraded"))
+}
+
+fn upgrade_script() -> String {
+    format!(
+        r#"set -e
+units=
+for u in patina-docker patina-ports; do
+  f=/etc/systemd/system/$u.service
+  [ -f "$f" ] || continue
+  grep -q -- 'socat {HALF_CLOSE} ' "$f" && continue
+  sed -i -e 's#^ExecStart=/usr/bin/socat VSOCK-LISTEN#ExecStart=/usr/bin/socat {HALF_CLOSE} VSOCK-LISTEN#' -e 's#^\[Service\]$#[Service]\nKillMode=process#' "$f"
+  units="$units $u.service"
+done
+p=/usr/local/sbin/patina-port
+if [ -f "$p" ] && ! grep -q -- 'socat {HALF_CLOSE} ' "$p"; then
+  sed -i 's#exec socat - TCP#exec socat {HALF_CLOSE} - TCP#' "$p"
+fi
+if [ -n "$units" ]; then
+  systemctl daemon-reload
+  systemd-run --quiet --on-active=1 systemctl restart $units
+  echo upgraded
+fi
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,9 +165,20 @@ mod tests {
         let u = user_data("/Users/someone");
         assert!(u.starts_with("#cloud-config\n"));
         assert!(u.contains("mount -t virtiofs patina-home '/Users/someone'"));
-        assert!(u.contains("VSOCK-LISTEN:2375"));
+        assert!(u.contains("socat -t 86400 VSOCK-LISTEN:2375"));
+        assert!(u.contains("exec socat -t 86400 - TCP:127.0.0.1"));
+        assert_eq!(u.matches("KillMode=process").count(), 2);
         assert!(u.contains("touch '/Users/someone/.patina/vm/provisioned'"));
         assert!(!u.contains("{{"));
+    }
+
+    #[test]
+    fn upgrade_matches_what_new_vms_get() {
+        let s = upgrade_script();
+        assert!(s.contains("ExecStart=/usr/bin/socat -t 86400 VSOCK-LISTEN#"));
+        assert!(s.contains("exec socat -t 86400 - TCP#"));
+        assert!(s.contains("s#^\\[Service\\]$#[Service]\\nKillMode=process#"));
+        assert!(!s.contains("{{"));
     }
 
     #[test]

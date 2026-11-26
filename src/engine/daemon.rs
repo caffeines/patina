@@ -236,6 +236,14 @@ async fn monitor(sh: Arc<Shared>) {
                     sh.status.lock().unwrap().first_boot = false;
                     sh.set("running", "Running");
                     if config::load().set_context {
+                    let d = d.clone();
+                    tokio::spawn(async move {
+                        match super::guest::upgrade(&d).await {
+                            Ok(true) => log("upgraded the guest's channels"),
+                            Ok(false) => {}
+                            Err(e) => log(&format!("couldn't upgrade the guest: {e}")),
+                        }
+                    });
                         match tokio::task::spawn_blocking(super::integrate::use_context).await {
                             Ok(Ok(())) => log("the docker command now uses the patina context"),
                             Ok(Err(e)) => log(&format!("couldn't switch the docker context: {e}")),

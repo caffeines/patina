@@ -1,0 +1,231 @@
+# Release Patina when a version tag is pushed (git tag v1.2.3 && git push origin v1.2.3).
+#
+# 1. build:    on Apple silicon, check the tag matches Cargo.toml, run the
+#              tests, and build the DMG with scripts/release-macos.sh. With the
+#              signing secrets it's signed with a Developer ID and notarized;
+#              without them it's ad-hoc signed, like a local build.
+# 2. release:  publish a GitHub release for the tag, with the commits since
+#              the last tag and the DMG attached.
+# 3. homebrew: point the tap's formula (caffeines/homebrew-patina) at the new
+#              tag and its commit, so `brew upgrade patina` builds it.
+#              Pre-releases (v1.2.3-beta.1) skip this.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   HOMEBREW_TAP_TOKEN   a fine-grained token with Contents: read and write on
+#                        caffeines/homebrew-patina. Without it the formula
+#                        isn't updated.
+#   Optional, to sign and notarize the DMG:
+#   MACOS_CERT_P12       a Developer ID Application certificate and its key,
+#                        exported as .p12, base64-encoded (base64 -i cert.p12).
+#   MACOS_CERT_PASSWORD  the .p12's password.
+#   DEVELOPER_ID         its name: "Developer ID Application: Name (TEAMID)".
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+#                        for notarization (an app-specific password).
+#   BUNDLE_ID            the bundle identifier, e.g. com.example.patina.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release this existing tag again (for example v1.0.0)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Test and build the DMG
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    env:
+      SIGN: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' }}
+      NOTARIZE: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' && secrets.APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check the tag matches Cargo.toml
+        id: meta
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::The tag is $TAG but Cargo.toml says version $version. Bump the version, commit, and tag that commit."
+            exit 1
+          fi
+          case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          {
+            echo "version=$version"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "prerelease=$pre"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Import the signing certificate
+        if: env.SIGN == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$keychain"
+
+      - name: Store the notarization credentials
+        if: env.NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials patina-notary \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          echo "NOTARY_PROFILE=patina-notary" >> "$GITHUB_ENV"
+
+      - name: Build the DMG
+        env:
+          DEVELOPER_ID: ${{ env.SIGN == 'true' && secrets.DEVELOPER_ID || '' }}
+          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
+        run: |
+          [ -n "$BUNDLE_ID" ] || unset BUNDLE_ID
+          ./scripts/release-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: target/dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
+          path: dist
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SIGNED: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
+          range="${prev:+$prev..}$TAG"
+          {
+            echo "## Changes"
+            echo
+            changes=$(git log --no-merges --format='- %s' "$range" | grep -v -E '^- Release [0-9]' || true)
+            echo "${changes:-- No changes besides the version.}"
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "brew install caffeines/patina/patina    # builds $TAG from source"
+            echo '```'
+            echo
+            if [ "$SIGNED" = "true" ]; then
+              echo "Or download the DMG below (Apple silicon, macOS 13 or later)."
+            else
+              echo "The DMG below is ad-hoc signed, so macOS blocks it on Macs other than the one that built it."
+              echo "Homebrew builds Patina on your Mac, which avoids that."
+            fi
+            if [ -n "$prev" ]; then
+              echo
+              echo "**Full changes:** https://github.com/${GITHUB_REPOSITORY}/compare/$prev...$TAG"
+            fi
+          } > notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
+            gh release upload "$TAG" dist/*.dmg --clobber
+          else
+            flags=""
+            [ "$PRERELEASE" = "true" ] && flags="--prerelease"
+            gh release create "$TAG" dist/*.dmg --verify-tag --title "Patina $VERSION" --notes-file notes.md $flags
+          fi
+
+  homebrew:
+    name: Update the Homebrew formula
+    needs: [build, release]
+    if: needs.build.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Without a token, say so
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "::warning::HOMEBREW_TAP_TOKEN isn't set, so caffeines/homebrew-patina still points at the previous release. Set tag: \"$TAG\" and revision: \"$COMMIT\" in Formula/patina.rb by hand."
+
+      - uses: actions/checkout@v4
+        if: env.TAP_TOKEN != ''
+        with:
+          repository: caffeines/homebrew-patina
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Point the formula at the release
+        if: env.TAP_TOKEN != ''
+        working-directory: tap
+        run: |
+          sed -i -E \
+            -e "s/^( +tag: +\")v[^\"]+\"/\1$TAG\"/" \
+            -e "s/^( +revision: +\")[0-9a-f]{40}\"/\1$COMMIT\"/" \
+            Formula/patina.rb
+          grep -q "tag: *\"$TAG\"" Formula/patina.rb || { echo "::error::Couldn't set the tag in Formula/patina.rb."; exit 1; }
+          grep -q "revision: *\"$COMMIT\"" Formula/patina.rb || { echo "::error::Couldn't set the revision in Formula/patina.rb."; exit 1; }
+          ruby -c Formula/patina.rb
+          if git diff --quiet; then
+            echo "The formula already points at $TAG."
+            exit 0
+          fi
+          git diff
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "patina $VERSION"
+          git push

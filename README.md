@@ -133,24 +133,34 @@ It installs the `patina` command and `Patina.app` (in `$(brew --prefix)/opt/pati
 patina` shows how to add the app to Applications. Homebrew needs current Command Line Tools to
 build from source; it says so if they're out of date.
 
-To release a version: set `version` in `Cargo.toml`, commit, then tag and push it here:
+To release a version: set `version` in `Cargo.toml` (`cargo build` updates `Cargo.lock`),
+commit, then tag that commit and push both:
 
 ```sh
-git tag v0.3.0
-git push origin main v0.3.0
-git rev-parse v0.3.0    # the commit, for the formula
+git tag v1.1.0
+git push origin main v1.1.0
 ```
 
-Then, in the tap's `Formula/patina.rb`, set the same tag and that commit, and push it:
+The tag starts the Release workflow (`.github/workflows/release.yml`). It checks that the tag
+matches `Cargo.toml`, runs the tests, builds the DMG on Apple silicon, publishes a GitHub release
+with the commits since the last tag and the DMG attached, and points the tap's
+`Formula/patina.rb` at the new tag and its commit, so `brew update && brew upgrade patina` picks
+it up. A tag with a suffix (`v1.1.0-beta.1`) makes a pre-release and leaves the formula alone.
+**Actions › Release › Run workflow** releases an existing tag again.
+
+To update the tap, the workflow needs a `HOMEBREW_TAP_TOKEN` secret: a fine-grained token with
+Contents read and write on caffeines/homebrew-patina. Without it, set the tag and its commit
+(`git rev-parse v1.1.0`) in the formula by hand:
 
 ```ruby
 url "https://github.com/caffeines/patina.git",
-    tag:      "v0.3.0",
+    tag:      "v1.1.0",
     revision: "<the commit from git rev-parse>"
 ```
 
-The revision pins the build to that commit even if the tag is moved. `brew update && brew
-upgrade patina` picks it up.
+The revision pins the build to that commit even if the tag is moved. The DMG is ad-hoc signed
+unless the workflow has a Developer ID certificate and notarization credentials; the secrets it
+takes are listed at the top of the workflow file.
 
 ## Release a DMG
 

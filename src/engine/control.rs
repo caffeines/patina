@@ -58,13 +58,26 @@ fn request(cmd: &str) -> Option<String> {
     Some(line.trim().to_string())
 }
 
-/// `None` when the engine isn't running.
+/// `None` when the engine isn't running. With this computer's own Docker
+/// Engine ([`super::NATIVE`]), it's running when Docker answers.
 pub fn status() -> Option<Status> {
+    if super::NATIVE {
+        return super::host::check().ok().map(|()| Status {
+            state: "running".into(),
+            message: format!("Docker Engine at {}", paths::docker_sock().display()),
+            rev: ENGINE_REV,
+            ..Default::default()
+        });
+    }
     request("status").and_then(|l| serde_json::from_str(&l).ok())
 }
 
-/// Ask the engine to shut down. Returns false when it wasn't running.
+/// Ask the engine to shut down. Returns false when it wasn't running, and
+/// always with this computer's own Docker Engine, which Patina doesn't stop.
 pub fn stop() -> bool {
+    if super::NATIVE {
+        return false;
+    }
     request("stop").is_some()
 }
 
@@ -77,15 +90,18 @@ pub fn log_tail(n: usize) -> String {
 
 /// Launch the engine helper in the background. It keeps running after the
 /// app quits, like a system service.
+///
+/// With this computer's own Docker Engine there's nothing to launch: this
+/// checks that it answers, and says what to do when it doesn't.
 pub fn start() -> Result<(), String> {
+    if super::NATIVE {
+        return super::host::check().map_err(|p| p.message);
+    }
     if status().is_some() {
         return Ok(());
     }
     if !setup::installed() {
         return Err("Patina's engine isn't set up yet.".into());
-    }
-    if !cfg!(target_os = "macos") {
-        return Err("Patina's engine needs macOS.".into());
     }
     paths::ensure();
     let helper = ensure_helper()?;

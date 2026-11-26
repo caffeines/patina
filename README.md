@@ -7,6 +7,9 @@ UI* design: the same layout, colors, type, copy and motion.
 Patina doesn't use any other container app. It runs its **own engine**: Docker Engine inside a
 small Linux VM that Patina boots itself with Apple's Virtualization framework.
 
+Patina also runs on Linux, where it needs no VM: it uses the Docker Engine already on the
+computer (see [On Linux](#on-linux)).
+
 ## How the engine works
 
 ```
@@ -117,6 +120,30 @@ To build a double-clickable app into `target/Patina.app`, and to run the tests:
 cargo test
 ```
 
+## On Linux
+
+Linux runs containers natively, so Patina doesn't boot a VM there: it uses the Docker Engine
+installed on the computer, and doesn't set it up, start, stop or reset it. It finds the socket
+from `DOCKER_HOST`, then rootless Docker (`$XDG_RUNTIME_DIR/docker.sock`), then
+`/var/run/docker.sock`. When Docker doesn't answer, Patina says why: it isn't installed, you're
+not in the `docker` group, or it isn't running.
+
+Install [Docker Engine](https://docs.docker.com/engine/install/), then one of the files from a
+[release](https://github.com/caffeines/patina/releases):
+
+```sh
+sudo apt install ./patina_1.1.0_amd64.deb          # Debian, Ubuntu (or _arm64)
+chmod +x Patina-1.1.0-x86_64.AppImage && ./Patina-1.1.0-x86_64.AppImage   # any distribution
+```
+
+Containers, images, volumes, networks, builds, the dashboard and Clean up work as on macOS.
+Open in Terminal uses the desktop's default terminal or one chosen in Settings › General (GNOME
+Terminal, Ptyxis, Konsole, kitty, Alacritty, WezTerm, Ghostty and others). Linux machines and
+Kubernetes run in Patina's VM, so they're macOS-only for now, and there's no menu bar item.
+
+`cargo run --release` builds and runs it on Linux too. `./scripts/release-linux.sh` builds the
+AppImage and .deb into `target/dist`, for the architecture it runs on.
+
 ## Install with Homebrew
 
 ```sh
@@ -142,8 +169,9 @@ git push origin main v1.1.0
 ```
 
 The tag starts the Release workflow (`.github/workflows/release.yml`). It checks that the tag
-matches `Cargo.toml`, runs the tests, builds the DMG on Apple silicon, publishes a GitHub release
-with the commits since the last tag and the DMG attached, and points the tap's
+matches `Cargo.toml`, runs the tests, builds the DMG on Apple silicon and the AppImages and .debs
+on Linux (x86_64 and aarch64), publishes a GitHub release with the commits since the last tag and
+those files attached, and points the tap's
 `Formula/patina.rb` at the new tag and its commit, so `brew update && brew upgrade patina` picks
 it up. A tag with a suffix (`v1.1.0-beta.1`) makes a pre-release and leaves the formula alone.
 **Actions › Release › Run workflow** releases an existing tag again.
@@ -250,6 +278,7 @@ cargo run -- --help                        # every option
 | `src/engine/setup.rs` | Downloads, checksum check, disk and boot loader, the docker CLI |
 | `src/engine/guest.rs` | The guest's first-boot provisioning (cloud-init) |
 | `src/engine/control.rs` | The app's side: start, stop, status |
+| `src/engine/host.rs` | On Linux: this computer's Docker Engine, its socket, and why it isn't answering |
 | `src/engine/machines.rs` | Linux machines: base images, setup, addresses, create, start, stop |
 | `src/engine/cleanup.rs` | Disk usage by kind, and Clean up |
 | `src/ui/dashboard.rs` | The dashboard |

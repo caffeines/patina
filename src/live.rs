@@ -99,6 +99,8 @@ pub struct Info {
     pub arch: String,
     pub endpoint: String,
     pub disk_gb: f64,
+    /// Where the engine keeps images, containers and volumes (`/var/lib/docker`).
+    pub root_dir: String,
     /// The engine was started from an older build and should be restarted.
     pub stale: bool,
 }
@@ -629,7 +631,11 @@ async fn worker(mut rx: tmpsc::UnboundedReceiver<Cmd>, out: Out) {
         last_down: None,
     };
     // Existing installs from before PATH integration or buildx get them now.
+    // This computer's own Docker Engine comes with its own docker command.
     let _ = blocking(|| {
+        if engine::NATIVE {
+            return;
+        }
         if engine::setup::installed() && config::load().shell_path && !integrate::shell_installed() {
             let _ = integrate::install_shell();
         }
@@ -780,6 +786,7 @@ impl W {
             arch,
             endpoint: endpoint(),
             disk_gb: 0.0,
+            root_dir: info.docker_root_dir.unwrap_or_default(),
             stale: blocking(control::status).await.flatten().is_some_and(|s| control::stale(&s)),
         }));
     }
@@ -1327,7 +1334,7 @@ impl W {
                 }
                 let saved = config::save(&c);
                 let key = k.clone();
-                let term = crate::terminal::APPS.iter().find(|a| a.0 == c.terminal).map_or("Terminal", |a| a.1);
+                let term = crate::terminal::name(&c.terminal);
                 // The docker context and shell profiles change right away.
                 let applied = blocking(move || match key.as_str() {
                     "set_context" if on => integrate::use_context().map(|_| "The docker command now uses Patina".to_string()),

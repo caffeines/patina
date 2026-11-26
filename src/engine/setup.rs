@@ -32,9 +32,10 @@ fn arch() -> &'static str {
     }
 }
 
-/// The engine has a disk and its first-boot seed.
+/// The engine has a disk and its first-boot seed. With this computer's own
+/// Docker Engine ([`super::NATIVE`]) there's nothing to set up.
 pub fn installed() -> bool {
-    paths::disk().exists() && paths::seed().exists()
+    super::NATIVE || (paths::disk().exists() && paths::seed().exists())
 }
 
 /// Progress callback: fraction done (negative when unknown) and a short note.

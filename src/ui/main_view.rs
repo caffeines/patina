@@ -130,7 +130,7 @@ fn chrome(view: View) -> (&'static str, Option<&'static str>) {
         View::Volumes => ("Volumes", Some("Create volume")),
         View::Networks => ("Networks", Some("Create network")),
         View::Builds => ("Builds", None),
-        View::Machines => ("Machines", Some("New machine")),
+        View::Machines => ("Machines", if crate::engine::NATIVE { None } else { Some("New machine") }),
         View::Kubernetes => ("Kubernetes", None),
         View::Settings => ("Settings", None),
     }
@@ -225,6 +225,9 @@ fn toolbar(ui: &mut Ui, cx: &mut Cx) {
 fn summary(s: &State, view: View) -> String {
     let down = matches!(s.engine, Engine::Off | Engine::Failed);
     let is_set = view == View::Settings;
+    if !is_set && down && s.is_live() && crate::engine::NATIVE {
+        return "Patina can't reach Docker.".into();
+    }
     if !is_set && s.engine == Engine::Off {
         return "The engine is stopped.".into();
     }
@@ -298,6 +301,7 @@ fn summary(s: &State, view: View) -> String {
             }
             _ => "A single-node cluster for local development.".into(),
         },
+        View::Settings if s.is_live() && crate::engine::NATIVE => "Patina uses the Docker Engine on this computer.".into(),
         View::Settings => "Resource limits apply after the engine restarts.".into(),
     }
 }
@@ -396,8 +400,20 @@ fn blocking(s: &State) -> Option<Block> {
                 Box::new(|s| s.want_setup = true),
             ));
         }
+        if s.is_live() && crate::engine::NATIVE {
+            let body = "Patina uses the Docker Engine on this computer. Start it with `sudo systemctl start docker`, and Patina connects as soon as it answers.";
+            return Some(block(icons::PLUG, "Docker isn't running", body, "Check again", Box::new(|s| s.cold_boot())));
+        }
         let body = "Containers, images, volumes and machines are unavailable until it starts.";
         return Some(block(icons::PLUG, "The engine is stopped", body, "Start engine", Box::new(|s| s.cold_boot())));
+    }
+    if !is_set && s.engine == Engine::Failed && s.is_live() && crate::engine::NATIVE {
+        // The check says what's wrong and what to do; show that.
+        let body = if s.engine_log.is_empty() { "Patina couldn't reach the Docker Engine on this computer.".to_string() } else { s.engine_log.clone() };
+        let mut b = block(icons::PLUG, "Patina can't reach Docker", body, "Check again", Box::new(|s| s.cold_boot()));
+        b.ring = ERR_EDGE;
+        b.ink = DANGER;
+        return Some(b);
     }
     if !is_set && s.engine == Engine::Failed {
         let body = if s.is_live() {
@@ -416,6 +432,15 @@ fn blocking(s: &State) -> Option<Block> {
     }
     if cold {
         return None;
+    }
+    // Both run in Patina's VM, which Linux doesn't use (see `engine::NATIVE`).
+    if crate::engine::NATIVE && s.is_live() && matches!(view, View::Machines | View::Kubernetes) {
+        let (title, body) = if view == View::Machines {
+            ("Machines aren't on Linux yet", "On macOS, Patina runs Linux machines in its own VM. On Linux they need a different design, coming in a later release. Containers, images, volumes, networks and builds all work.")
+        } else {
+            ("Kubernetes isn't on Linux yet", "On macOS, Patina runs k3s in its own VM. On Linux it needs a different design, coming in a later release. Containers, images, volumes, networks and builds all work.")
+        };
+        return Some(block(icons::nav(view), title, body, "Open containers", Box::new(|s| s.go_view(View::Containers))));
     }
     let boxes: Vec<_> = s.alive().collect();
     if view == View::Containers {

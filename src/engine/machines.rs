@@ -528,6 +528,11 @@ async fn base(d: &Docker, distro: &Distro, step: Step<'_>) -> Result<String, Str
 
 /// Create a machine and start it. `step` hears what it's doing.
 pub async fn create(d: &Docker, key: &str, name: &str, step: Step<'_>) -> Result<(), String> {
+    // A machine's address comes from the VM's network (see `kube::in_vm`),
+    // so say so before downloading anything.
+    if super::NATIVE {
+        return Err("Linux machines need Patina's VM, which Patina doesn't use on Linux yet.".into());
+    }
     if !valid_name(name) {
         return Err("Use lowercase letters, digits and dashes for the name.".into());
     }

@@ -37,7 +37,8 @@ OPTIONS:
     --screenshot <png>  save a screenshot of the window and quit (with --wait <seconds>);
                         the window ignores all input while it waits
     --popover           show the menu bar popover in a window of its own (for screenshots)
-    --write-icon <png>  write the 1024px app icon and quit
+    --write-icon <png>  write the app icon and quit
+    --icon-size <px>    the icon's size for --write-icon, given before it (default 1024)
     -V, --version       print the version
     -h, --help          print this help
 
@@ -54,6 +55,7 @@ DEMO OPTIONS (imply --demo):
 
 fn parse_args() -> Args {
     let mut a = Args { wait: 1.5, step: 1, ..Default::default() };
+    let mut icon_size = 1024;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().unwrap_or_default();
@@ -69,9 +71,10 @@ fn parse_args() -> Args {
             "--step" => a.step = val().parse().unwrap_or(1),
             "--screenshot" => a.screenshot = Some(val().into()),
             "--wait" => a.wait = val().parse().unwrap_or(1.5),
+            "--icon-size" => icon_size = val().parse().unwrap_or(1024).clamp(16, 2048),
             "--write-icon" => {
                 let path = val();
-                let icon = app::app_icon(1024);
+                let icon = app::app_icon(icon_size);
                 match app::save_rgba_png(std::path::Path::new(&path), &icon.rgba, icon.width, icon.height) {
                     Ok(()) => std::process::exit(0),
                     Err(e) => {
@@ -113,6 +116,16 @@ fn engine_cli(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         #[cfg(target_os = "macos")]
         Some("run") => engine::daemon::run(),
+        Some("setup") if engine::NATIVE => {
+            eprintln!("Nothing to set up: Patina uses the Docker Engine on this computer.");
+            match engine::host::check() {
+                Ok(()) => 0,
+                Err(p) => {
+                    eprintln!("{}", p.message);
+                    1
+                }
+            }
+        }
         Some("setup") => {
             eprintln!("Installing docker, compose and buildx");
             if let Err(e) = setup::install_cli(&report) {
@@ -128,6 +141,10 @@ fn engine_cli(args: &[String]) -> i32 {
             0
         }
         Some("start") => match control::start() {
+            Ok(()) if engine::NATIVE => {
+                eprintln!("Docker Engine is running.");
+                0
+            }
             Ok(()) => {
                 eprintln!("Starting. Follow along with `patina engine status`.");
                 0
@@ -137,6 +154,10 @@ fn engine_cli(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("stop") if engine::NATIVE => {
+            eprintln!("Patina uses this computer's Docker Engine and leaves it running. To stop it: sudo systemctl stop docker");
+            1
+        }
         Some("stop") => {
             if !control::stop() {
                 eprintln!("The engine isn't running.");
@@ -153,12 +174,21 @@ fn engine_cli(args: &[String]) -> i32 {
             1
         }
         Some("status") => match control::status() {
+            Some(s) if engine::NATIVE => {
+                println!("{}: {}", s.state, s.message);
+                0
+            }
             Some(s) => {
                 println!("{}: {} ({:.0} s)", s.state, s.message, s.uptime);
                 0
             }
             None => {
                 println!("stopped{}", if setup::installed() { "" } else { " (not set up)" });
+                if engine::NATIVE {
+                    if let Err(p) = engine::host::check() {
+                        eprintln!("{}", p.message);
+                    }
+                }
                 3
             }
         },
@@ -243,8 +273,16 @@ fn engine_cli(args: &[String]) -> i32 {
                     row("Volumes", u.volumes, format!("{} unused", u.volumes_unused.n));
                     row("Build cache", u.cache, format!("{} reclaimable", fmt_bytes(u.cache_unused.bytes)));
                     println!("{:<16} {:>5}  {:>9}  {} reclaimable", "Total", "", fmt_bytes(u.total()), fmt_bytes(u.reclaimable()));
-                    let limit = engine::config::load().disk_gb;
-                    println!("{:<16} {:>5}  {:>9}  of up to {limit} GB on this Mac", "Disk image", "", fmt_bytes(engine::cleanup::disk_image_bytes()));
+                    if engine::NATIVE {
+                        // The disk Docker's data is on.
+                        let root = d.info().await.ok().and_then(|i| i.docker_root_dir).unwrap_or_else(|| "/var/lib/docker".into());
+                        if let Some((used, all)) = engine::cleanup::fs_usage(&root) {
+                            println!("{:<16} {:>5}  {:>9}  of {} used, on the disk with {root}", "Disk", "", fmt_bytes(used), fmt_bytes(all));
+                        }
+                    } else {
+                        let limit = engine::config::load().disk_gb;
+                        println!("{:<16} {:>5}  {:>9}  of up to {limit} GB on this Mac", "Disk image", "", fmt_bytes(engine::cleanup::disk_image_bytes()));
+                    }
                     return Ok(String::new());
                 }
                 let mut sel = Sel::default();
@@ -278,6 +316,10 @@ fn engine_cli(args: &[String]) -> i32 {
                     1
                 }
             }
+        }
+        Some("reset") if engine::NATIVE => {
+            eprintln!("There's no VM to reset: Patina uses this computer's Docker Engine.");
+            1
         }
         Some("reset") => {
             if control::status().is_some() {
@@ -410,7 +452,9 @@ fn main() -> eframe::Result {
         std::process::exit(machine_cli(&argv[2..]));
     }
     let args = parse_args();
-    let first_run = if args.demo { !app::is_onboarded() } else { !engine::setup::installed() };
+    // With this computer's own Docker Engine there's nothing to install, so
+    // first run is until the first-run flow has been through once.
+    let first_run = if args.demo || engine::NATIVE { !app::is_onboarded() } else { !engine::setup::installed() };
     let show_onboarding = !args.popover && (args.onboarding || (args.screenshot.is_none() && first_run && args.preset.show.is_empty()));
     let (size, min, resizable) = if args.popover {
         (menubar::POPOVER_SIZE, menubar::POPOVER_SIZE, false)

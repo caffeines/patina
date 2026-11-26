@@ -84,7 +84,13 @@ fn runtime() -> tokio::runtime::Runtime {
 pub fn detect() -> Option<Source> {
     runtime().block_on(async {
         let mut idle = None;
+        // Never offer to import from the engine Patina already uses (on
+        // Linux, that's this computer's own Docker Engine).
+        let ours = std::fs::canonicalize(paths::docker_sock()).ok();
         for (name, sock) in candidates() {
+            if ours.is_some() && std::fs::canonicalize(&sock).ok() == ours {
+                continue;
+            }
             let found = match tokio::time::timeout(Duration::from_secs(5), async { plan(&connect(&sock, 5).await?).await }).await {
                 Ok(Ok(p)) => Some(p),
                 _ => None,

@@ -89,8 +89,10 @@ pub fn show(ctx: &Context, cx: &mut Cx) {
                 }
             }
 
-            // Engine card, pinned to the bottom.
-            let card_h = 147.0;
+            // Engine card, pinned to the bottom. Patina doesn't restart or
+            // stop this computer's own Docker Engine, so that card has no
+            // buttons while it runs.
+            let card_h = if crate::engine::NATIVE && cx.s.live() { 105.0 } else { 147.0 };
             let card = Rect::from_min_size(pos2(x0, r.bottom() - 14.0 - card_h), vec2(wd, card_h));
             let (a, dy) = enter(cx.tw, started, 0.3, 0.6);
             let card = card.translate(vec2(0.0, dy));
@@ -133,7 +135,9 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     let is_live = s.is_live();
     let connecting = is_live && boot && s.engine_op.is_none() && s.engine_state.is_empty();
     let (cpus, mem_gb, arch) = if is_live && s.info.cpus > 0 {
-        let from_cfg = !s.cfg.is_empty();
+        // The VM's limits, from Patina's settings; this computer's own Docker
+        // Engine reports the computer's.
+        let from_cfg = !s.cfg.is_empty() && !crate::engine::NATIVE;
         let cpus = if from_cfg { s.saved.0 } else { s.info.cpus };
         let mem = if from_cfg { s.saved.1 as f64 } else { s.info.mem_gb };
         (cpus, mem, if s.info.arch.is_empty() { "arm64".to_string() } else { s.info.arch.clone() })
@@ -161,6 +165,9 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
     if connecting {
         return;
     }
+    if live && crate::engine::NATIVE {
+        return;
+    }
     if live {
         let half = (full - 8.0) / 2.0;
         if btn("Restart").at(ui, Rect::from_min_size(pos2(x, y), vec2(half, 28.0)), Id::new("eng-restart")).clicked() {
@@ -170,7 +177,11 @@ fn engine_card(ui: &mut egui::Ui, cx: &mut Cx, card: Rect) {
             cx.fx.push(Box::new(|s| s.power_flip()));
         }
     } else {
-        let label = if down { "Start" } else { "Stop" };
+        let label = match (down, crate::engine::NATIVE && is_live) {
+            (true, true) => "Check again",
+            (true, false) => "Start",
+            (false, _) => "Stop",
+        };
         if btn(label).at(ui, Rect::from_min_size(pos2(x, y), vec2(full, 28.0)), Id::new("eng-power")).clicked() {
             cx.fx.push(Box::new(|s| s.power_flip()));
         }
@@ -184,8 +195,11 @@ pub fn engine_text(s: &State, running: String) -> (String, String) {
     let boot = eng == Engine::Booting;
     let is_live = s.is_live();
     let connecting = is_live && boot && s.engine_op.is_none() && s.engine_state.is_empty();
-    let title = if connecting {
+    let native = is_live && crate::engine::NATIVE;
+    let title = if connecting || (boot && native) {
         "Connecting to Docker".to_string()
+    } else if native && matches!(eng, Engine::Off | Engine::Failed) {
+        "Can't reach Docker".to_string()
     } else if boot && is_live {
         match s.engine_state.as_str() {
             "installing" => "Installing Docker".to_string(),
@@ -196,6 +210,7 @@ pub fn engine_text(s: &State, running: String) -> (String, String) {
         ["Booting kernel", "Starting agent", "Starting Docker Engine"][s.boot.min(2)].to_string()
     } else {
         match eng {
+            _ if native => "Docker running".into(),
             Engine::Ready => format!("Ready in {:.1} s", s.ready_secs),
             Engine::Off if is_live && s.engine_op.is_some() => "Stopping the engine".into(),
             Engine::Off => "Engine stopped".into(),
@@ -203,14 +218,17 @@ pub fn engine_text(s: &State, running: String) -> (String, String) {
             _ => "Engine running".into(),
         }
     };
-    let sub = if connecting {
+    let sub = if connecting || (boot && native) {
         "Looking for the engine".to_string()
+    } else if native && matches!(eng, Engine::Off | Engine::Failed) {
+        "Is Docker Engine running?".to_string()
     } else if boot && is_live && s.engine_state == "installing" {
         "First start takes a few minutes".to_string()
     } else if boot {
         "Starting".to_string()
     } else {
         match eng {
+            Engine::Ready if native => running,
             Engine::Ready => "Resuming containers".into(),
             Engine::Off if is_live && s.engine_op.is_some() => "Containers are shutting down".into(),
             Engine::Off => "Nothing is running".into(),

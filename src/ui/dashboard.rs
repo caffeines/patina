@@ -182,7 +182,12 @@ fn disk_card(ui: &mut Ui, cx: &mut Cx, r: Rect, u: Option<&Usage>) {
     let hero = w::g_ls(&cui, &fmt_bytes(shown), semibold(48.0), TEXT, -1.2);
     w::put(&p, &hero, pos2(x, y + 28.0), Align2::LEFT_CENTER);
     y += 56.0 + 4.0;
-    let sub = if cx.s.is_live() {
+    let sub = if cx.s.is_live() && crate::engine::NATIVE {
+        match crate::engine::cleanup::fs_usage(&cx.s.info.root_dir) {
+            Some((used, all)) => format!("Docker's share of a disk using {} of {} on this computer", fmt_bytes(used), fmt_bytes(all)),
+            None => "Docker's share of this computer's disk".into(),
+        }
+    } else if cx.s.is_live() {
         let image = crate::engine::cleanup::disk_image_bytes();
         let limit = crate::engine::config::load().disk_gb;
         format!("Docker's share of a disk image using {} of up to {limit} GB on this Mac", fmt_bytes(image))
@@ -263,6 +268,7 @@ fn engine_card(ui: &mut Ui, cx: &mut Cx, r: Rect) {
         Engine::Running | Engine::Ready => (St::Running, "Running"),
         Engine::Booting => (St::Starting, "Starting"),
         Engine::Off => (St::Stopped, "Stopped"),
+        Engine::Failed if crate::engine::NATIVE => (St::Error, "Can't reach Docker"),
         Engine::Failed => (St::Error, "Couldn't start"),
     };
     cx.ambient |= w::status_dot(&p, cx.tw, Id::new("dash-eng"), pos2(x + 5.0, y + 10.0), st, false, -10.0);
@@ -271,6 +277,8 @@ fn engine_card(ui: &mut Ui, cx: &mut Cx, r: Rect) {
     let i = &s.info;
     let sub = if s.is_live() && !i.version.is_empty() {
         format!("Docker {} on {}", i.version, i.runtime.replace(" GNU/Linux", ""))
+    } else if s.is_live() && crate::engine::NATIVE {
+        "Docker Engine on this computer".into()
     } else if s.is_live() {
         "Docker Engine in Patina's VM".into()
     } else {
@@ -289,14 +297,20 @@ fn engine_card(ui: &mut Ui, cx: &mut Cx, r: Rect) {
     w::bar(&p, Rect::from_min_size(pos2(x, y), vec2(right - x, 6.0)), frac, VERDIGRIS, VERDIGRIS.gamma_multiply(0.18));
     y += 6.0 + 18.0;
 
-    // The disk image: what macOS has allocated of its limit.
-    let (image, limit) = if s.is_live() {
-        (crate::engine::cleanup::disk_image_bytes(), crate::engine::config::load().disk_gb as f64 * 1e9)
+    // The disk image: what macOS has allocated of its limit. With this
+    // computer's own Docker Engine, the disk its data is on.
+    let (label, disk) = if s.is_live() && crate::engine::NATIVE {
+        ("Disk", crate::engine::cleanup::fs_usage(&i.root_dir))
+    } else if s.is_live() {
+        ("Disk image", Some((crate::engine::cleanup::disk_image_bytes(), crate::engine::config::load().disk_gb as f64 * 1e9)))
     } else {
-        (23.4e9, 64e9)
+        ("Disk image", Some((23.4e9, 64e9)))
     };
-    w::text(&p, &cui, x, y + 8.0, "Disk image", sans(13.0), TEXT2);
-    w::text_right(&p, &cui, right, y + 8.0, &format!("{} of {:.0} GB", fmt_bytes(image), limit / 1e9), mono(12.5), TEXT);
+    // Unknown when Docker's data directory can't be looked at from here.
+    let (image, limit) = disk.unwrap_or((0.0, 0.0));
+    let disk_txt = if disk.is_some() { format!("{} of {:.0} GB", fmt_bytes(image), limit / 1e9) } else { "—".into() };
+    w::text(&p, &cui, x, y + 8.0, label, sans(13.0), TEXT2);
+    w::text_right(&p, &cui, right, y + 8.0, &disk_txt, mono(12.5), TEXT);
     y += 16.0 + 8.0;
     let dfrac = cx.tw.f("dash-img", (image / limit.max(1.0)).clamp(0.0, 1.0) as f32, 0.9, Ease::OUT);
     w::bar(&p, Rect::from_min_size(pos2(x, y), vec2(right - x, 6.0)), dfrac, VERDIGRIS, VERDIGRIS.gamma_multiply(0.18));
@@ -307,13 +321,17 @@ fn engine_card(ui: &mut Ui, cx: &mut Cx, r: Rect) {
     let arch = if i.arch.is_empty() { "arm64".to_string() } else { i.arch.clone() };
     let home = crate::engine::paths::home().display().to_string();
     let sock = crate::engine::paths::docker_sock().display().to_string().replacen(&home, "~", 1);
-    let rows: Vec<(&str, String, Option<View>)> = vec![
+    let mut rows: Vec<(&str, String, Option<View>)> = vec![
         ("CPUs", format!("{cpus} cores · {arch}"), Some(View::Settings)),
         ("Kubernetes", if s.kube == Kube::On { "On".into() } else { on(false).into() }, Some(View::Kubernetes)),
         ("Rosetta for Intel images", on(s.cfg_on("rosetta") || !s.is_live()).into(), Some(View::Settings)),
         ("Docker endpoint", sock, None),
         ("Patina", env!("CARGO_PKG_VERSION").to_string(), Some(View::Settings)),
     ];
+    // Linux has no Rosetta.
+    if crate::engine::NATIVE {
+        rows.remove(2);
+    }
     for (k, (label, value, view)) in rows.into_iter().enumerate() {
         let row = Rect::from_min_size(pos2(x - 8.0, y), vec2(right - x + 16.0, 34.0));
         if k > 0 {

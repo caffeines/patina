@@ -31,7 +31,22 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         let host = host_cpus();
-        EngineConfig { cpus: host.clamp(1, 4), memory_gb: 4, disk_gb: 64, rosetta: true, autostart: true, login: false, set_context: true, shell_path: true, menubar: true, kubernetes: false, terminal: String::new() }
+        // This computer's own Docker Engine needs no docker context or PATH
+        // line, and Linux has neither Rosetta nor Patina's menu bar item.
+        let vm = !super::NATIVE;
+        EngineConfig {
+            cpus: host.clamp(1, 4),
+            memory_gb: 4,
+            disk_gb: 64,
+            rosetta: vm,
+            autostart: true,
+            login: false,
+            set_context: vm,
+            shell_path: vm,
+            menubar: vm,
+            kubernetes: false,
+            terminal: String::new(),
+        }
     }
 }
 
@@ -63,7 +78,8 @@ pub fn save(cfg: &EngineConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Open Patina at login with a LaunchAgent (macOS).
+/// Open Patina at login: a LaunchAgent on macOS, an XDG autostart entry
+/// (`~/.config/autostart/patina.desktop`) elsewhere.
 fn set_login_item(on: bool) {
     #[cfg(target_os = "macos")]
     {
@@ -92,13 +108,57 @@ fn set_login_item(on: bool) {
         let _ = std::fs::write(plist, body);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = on;
+    {
+        let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| paths::home().join(".config"));
+        let file = config.join("autostart").join("patina.desktop");
+        if !on {
+            let _ = std::fs::remove_file(&file);
+            return;
+        }
+        // An AppImage runs from a temporary mount; $APPIMAGE is the file itself.
+        let exe = match std::env::var_os("APPIMAGE") {
+            Some(a) => std::path::PathBuf::from(a),
+            None => match std::env::current_exe() {
+                Ok(e) => stable_exe(&e),
+                Err(_) => return,
+            },
+        };
+        let _ = std::fs::create_dir_all(config.join("autostart"));
+        let _ = std::fs::write(file, autostart_entry(&exe));
+    }
+}
+
+/// The autostart entry that opens `exe` at login.
+#[cfg(any(not(target_os = "macos"), test))]
+fn autostart_entry(exe: &std::path::Path) -> String {
+    format!("[Desktop Entry]\nType=Application\nName=Patina\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n", desktop_exec(&exe.display().to_string()))
+}
+
+/// One argument of a desktop entry's `Exec`, quoted as the spec asks: in
+/// double quotes, with `"`, `` ` ``, `$` and `\` escaped by a backslash, and
+/// `%` doubled. String values are unescaped before the quoting is read, so
+/// each of those backslashes is written as two.
+#[cfg(any(not(target_os = "macos"), test))]
+fn desktop_exec(arg: &str) -> String {
+    let mut out = String::from('"');
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            '%' => out.push_str("%%"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Homebrew installs into a versioned Cellar folder that an upgrade removes.
 /// Point at its `opt` link instead, which always leads to the current version:
 /// `/opt/homebrew/Cellar/patina/0.1.0/bin/patina` becomes `/opt/homebrew/opt/patina/bin/patina`.
-#[cfg(any(target_os = "macos", test))]
 fn stable_exe(path: &std::path::Path) -> std::path::PathBuf {
     let parts: Vec<_> = path.components().collect();
     match parts.iter().position(|c| c.as_os_str() == "Cellar") {
@@ -122,7 +182,17 @@ fn xml_escape(s: &str) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::stable_exe;
+    use super::{autostart_entry, desktop_exec, stable_exe};
+
+    #[test]
+    fn autostart_quotes_the_path() {
+        assert_eq!(desktop_exec("/usr/bin/patina"), r#""/usr/bin/patina""#);
+        assert_eq!(desktop_exec("/home/a b/50%/patina"), r#""/home/a b/50%%/patina""#);
+        assert_eq!(desktop_exec(r#"/x/"$`\/p"#), r#""/x/\\"\\$\\`\\\\/p""#);
+        let entry = autostart_entry(Path::new("/opt/Patina.AppImage"));
+        assert!(entry.starts_with("[Desktop Entry]\n"));
+        assert!(entry.contains("\nExec=\"/opt/Patina.AppImage\"\n"));
+    }
 
     #[test]
     fn homebrew_paths_survive_upgrades() {

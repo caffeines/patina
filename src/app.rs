@@ -125,6 +125,7 @@ impl App {
     }
 
     fn close_pop(&mut self, blurred: bool, now: f64) {
+        menubar::trace(if blurred { "popover closed: lost focus" } else { "popover closed" });
         self.pop = None;
         if blurred {
             self.pop_blurred = now;
@@ -157,12 +158,14 @@ impl App {
         for ev in menubar::take_events() {
             match ev {
                 menubar::Event::Toggle(anchor) => {
+                    menubar::trace(&format!("toggle at {:?} (open: {})", anchor.native, self.pop.is_some()));
                     if self.pop.is_some() {
                         self.close_pop(false, now);
                     } else if now - self.pop_blurred > 0.35 {
                         // A click on the status item can arrive just after the
                         // popover closed for losing focus; don't reopen it then.
-                        menubar::activate();
+                        // Patina is activated once the popover is on screen
+                        // (see `style_popover`), so macOS doesn't switch Spaces.
                         self.pop = Some(Pop { anchor, opened: now, frames: 0, focused: false });
                     }
                 }
@@ -199,7 +202,9 @@ impl App {
             .with_resizable(false)
             .with_always_on_top()
             .with_taskbar(false)
-            .with_active(true);
+            // Made hidden: shown on the current Space once it may join every
+            // Space, including a full-screen app's.
+            .with_visible(false);
         let (out, fx, ambient, focused, esc) = ctx.show_viewport_immediate(ViewportId::from_hash_of("patina-popover"), builder, |ctx, _| {
             let mut cx = Cx { s: &mut self.s, tw: &mut self.tw, fx: Vec::new(), now, started: t0, ambient: false };
             let out = egui::CentralPanel::default().frame(Frame::NONE).show(ctx, |ui| popover::show(ui, &mut cx, t0)).inner;

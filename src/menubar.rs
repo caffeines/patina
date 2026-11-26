@@ -40,6 +40,13 @@ pub const POPOVER_TITLE: &str = "Patina menu";
 const GAP: f64 = 6.0;
 
 static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
+
+/// Print what the status item and popover do when PATINA_DEBUG is set.
+pub fn trace(what: &str) {
+    if std::env::var_os("PATINA_DEBUG").is_some() {
+        eprintln!("[patina] menu bar: {what}");
+    }
+}
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 
 fn push(ev: Event) {
@@ -89,7 +96,8 @@ mod mac {
     use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSEventMask, NSEventModifierFlags, NSEventType, NSImage, NSMenu,
-        NSApplicationDidBecomeActiveNotification, NSMenuItem, NSScreen, NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSWindowCollectionBehavior,
+        NSApplicationDidBecomeActiveNotification, NSMenuItem, NSPopUpMenuWindowLevel, NSScreen, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
+        NSWindowCollectionBehavior,
     };
     use objc2_foundation::{NSData, NSNotificationCenter, NSObject, NSPoint, NSSize, NSString};
 
@@ -136,6 +144,7 @@ mod mac {
     }
 
     fn on_click(mtm: MainThreadMarker) {
+        super::trace("status item clicked");
         let app = NSApplication::sharedApplication(mtm);
         let secondary = app.currentEvent().is_some_and(|e| {
             e.r#type() == NSEventType::RightMouseUp || e.modifierFlags().contains(NSEventModifierFlags::Control)
@@ -281,10 +290,16 @@ mod mac {
     }
 
     /// Native touches egui can't express: the popover's shadow, its place on
-    /// every Space (including over full-screen apps), and its exact position.
+    /// every Space (including over full-screen apps), its level above the
+    /// menu bar, and its exact position. With `anchor` (the first frame) it
+    /// also shows the popover, which egui made hidden: on screen first, on
+    /// the current Space, and only then is Patina activated. Activating an
+    /// app with no window on the current Space makes macOS switch to one
+    /// that has one, which took you out of a full-screen app.
     pub fn style_popover(anchor: Option<Anchor>) {
         let Some(mtm) = MainThreadMarker::new() else { return };
-        for w in NSApplication::sharedApplication(mtm).windows().iter() {
+        let app = NSApplication::sharedApplication(mtm);
+        for w in app.windows().iter() {
             if w.title().to_string() != POPOVER_TITLE {
                 continue;
             }
@@ -293,10 +308,25 @@ mod mac {
             w.setCollectionBehavior(
                 NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::Transient
                     | NSWindowCollectionBehavior::IgnoresCycle,
             );
+            w.setLevel(NSPopUpMenuWindowLevel);
             if let Some(a) = anchor {
+                super::trace(&format!("showing the popover at {:?} on screen {:?}", a.native, w.screen().map(|s| s.frame())));
                 w.setFrameTopLeftPoint(NSPoint { x: a.native[0], y: a.native[1] });
+                w.orderFrontRegardless();
+                #[allow(deprecated)]
+                app.activateIgnoringOtherApps(true);
+                w.makeKeyAndOrderFront(None);
+                super::trace(&format!(
+                    "popover visible: {}, on active Space: {}, behavior: {:?}, level: {}, policy: {:?}",
+                    w.isVisible(),
+                    w.isOnActiveSpace(),
+                    w.collectionBehavior(),
+                    w.level(),
+                    app.activationPolicy()
+                ));
             }
         }
     }

@@ -180,6 +180,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # install.sh checks its download against this.
+      - name: Checksum the files
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+
       - name: Write the release notes
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -210,12 +215,14 @@ jobs:
             echo
             echo "### Linux"
             echo
-            echo "Patina uses the Docker Engine already on the computer: install Docker first, and be in the \`docker\` group."
-            echo "Download the AppImage for your architecture (any distribution), or on Debian and Ubuntu, the .deb:"
+            echo "Patina uses the Docker Engine on the computer, and you need to be in the \`docker\` group."
+            echo "This installs the .deb on Debian and Ubuntu, and the AppImage elsewhere:"
             echo
             echo '```sh'
-            echo "sudo apt install ./patina_${VERSION}_amd64.deb    # or _arm64"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
             echo '```'
+            echo
+            echo "Or download the AppImage for your architecture (any distribution), or the .deb (\`sudo apt install ./patina_${VERSION}_amd64.deb\`, or \`_arm64\`)."
             echo
             echo "Linux machines and Kubernetes are macOS-only for now."
             if [ -n "$prev" ]; then

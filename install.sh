@@ -56,10 +56,12 @@ case "$METHOD" in
   *) fail "PATINA_INSTALL is deb or appimage, not $METHOD." ;;
 esac
 
-# apt runs as root. Without root or sudo, fall back to the AppImage.
+# apt runs as root. Without root or sudo, fall back to the AppImage. (Not
+# `sudo -v`: it asks for a password unless every sudo rule for the user is
+# NOPASSWD, as in a Patina machine, where the account has no password.)
 SUDO=""
 if [ "$METHOD" = deb ] && [ "$(id -u)" -ne 0 ]; then
-  if command -v sudo > /dev/null && sudo -v < /dev/null; then
+  if command -v sudo > /dev/null && sudo true < /dev/null; then
     SUDO=sudo
   elif [ -n "${PATINA_INSTALL:-}" ]; then
     fail "installing the .deb needs root or sudo. PATINA_INSTALL=appimage installs Patina for you alone."

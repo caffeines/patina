@@ -48,10 +48,6 @@ install takes a few minutes while Rust compiles, and needs current Command Line 
 says if they're out of date). It installs the `patina` command and `Patina.app`, and `brew info
 patina` shows how to add the app to Applications. To update: `brew update && brew upgrade patina`.
 
-Each [release](https://github.com/caffeines/patina/releases) also has a DMG. If the release's
-notes say it's ad-hoc signed, macOS blocks it on Macs other than the one that built it, so use
-Homebrew.
-
 **The first launch sets up the engine.** It downloads Debian's arm64 cloud image, checks it
 against Debian's SHA-512, and installs Docker Engine in the VM. That takes about 2–3 minutes,
 once; after that, the engine starts in about 4 seconds. Everything lives in `~/.patina`.

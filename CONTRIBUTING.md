@@ -194,11 +194,11 @@ git push origin main v1.1.0
 ```
 
 The tag starts the Release workflow (`.github/workflows/release.yml`). It checks that the tag
-matches `Cargo.toml` and runs the tests. It builds the DMG on Apple silicon, and the AppImages
-and .debs on Linux (x86_64 and aarch64). Then it publishes a GitHub release with the commits
-since the last tag, those files, and their `SHA256SUMS`, which `install.sh` checks downloads
-against. Last, it points the tap's `Formula/patina.rb` at the new tag and its commit, so `brew
-update && brew upgrade patina` picks it up. A tag with a suffix (`v1.1.0-beta.1`) makes a
+matches `Cargo.toml` and runs the tests on Apple silicon, and builds the AppImages and .debs on
+Linux (x86_64 and aarch64). Then it publishes a GitHub release with the commits since the last
+tag, those files, and their `SHA256SUMS`, which `install.sh` checks downloads against. As soon as
+the macOS tests pass, it points the tap's `Formula/patina.rb` at the new tag and its commit, so
+`brew update && brew upgrade patina` picks it up. A tag with a suffix (`v1.1.0-beta.1`) makes a
 pre-release and leaves the formula alone. **Actions › Release › Run workflow** releases an
 existing tag again.
 
@@ -210,8 +210,9 @@ notarization: Gatekeeper checks apps downloaded from the internet, and this one 
 locally.
 
 To update the tap, the workflow needs a `HOMEBREW_TAP_TOKEN` secret: a fine-grained token with
-Contents read and write on caffeines/homebrew-patina. Without it, set the tag and its commit
-(`git rev-parse v1.1.0`) in the formula by hand:
+Contents read and write on caffeines/homebrew-patina. Without it the Homebrew job fails; add the
+secret and re-run the job, or set the tag and its commit (`git rev-parse v1.1.0`) in the formula
+by hand:
 
 ```ruby
 url "https://github.com/caffeines/patina.git",
@@ -221,10 +222,9 @@ url "https://github.com/caffeines/patina.git",
 
 The revision pins the build to that commit even if the tag is moved.
 
-### A signed DMG
+### A DMG
 
-The DMG is ad-hoc signed unless the workflow has a Developer ID certificate and notarization
-credentials; the secrets it takes are listed at the top of the workflow file. To build one by
+Releases don't include a DMG; Homebrew is how Patina is installed on macOS. To build one by
 hand, `./scripts/release-macos.sh` builds `target/dist/Patina-<version>-arm64.dmg`. Without the
 variables below, the DMG gets an ad-hoc signature, which works on this Mac but other Macs block.
 

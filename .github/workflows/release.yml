@@ -1,30 +1,21 @@
 # Release Patina when a version tag is pushed (git tag v1.2.3 && git push origin v1.2.3).
 #
-# 1. build:    on Apple silicon, check the tag matches Cargo.toml, run the
-#              tests, and build the DMG with scripts/release-macos.sh. With the
-#              signing secrets it's signed with a Developer ID and notarized;
-#              without them it's ad-hoc signed, like a local build.
+# 1. build:    on Apple silicon, check the tag matches Cargo.toml and run the
+#              tests (Homebrew builds Patina from source on Macs).
 #    linux:    meanwhile, on Ubuntu 22.04 for x86_64 and aarch64, run the
 #              tests and build an AppImage and a .deb with
 #              scripts/release-linux.sh.
-# 2. release:  publish a GitHub release for the tag, with the commits since
-#              the last tag, and the DMG, AppImages and .debs attached.
-# 3. homebrew: point the tap's formula (caffeines/homebrew-patina) at the new
-#              tag and its commit, so `brew upgrade patina` builds it.
-#              Pre-releases (v1.2.3-beta.1) skip this.
+# 2. release:  once both pass, publish a GitHub release for the tag, with the
+#              commits since the last tag, and the AppImages and .debs attached.
+#    homebrew: once build passes, point the tap's formula
+#              (caffeines/homebrew-patina) at the new tag and its commit, so
+#              `brew upgrade patina` builds it. Pre-releases (v1.2.3-beta.1)
+#              skip this.
 #
 # Secrets (Settings > Secrets and variables > Actions):
 #   HOMEBREW_TAP_TOKEN   a fine-grained token with Contents: read and write on
-#                        caffeines/homebrew-patina. Without it the formula
-#                        isn't updated.
-#   Optional, to sign and notarize the DMG:
-#   MACOS_CERT_P12       a Developer ID Application certificate and its key,
-#                        exported as .p12, base64-encoded (base64 -i cert.p12).
-#   MACOS_CERT_PASSWORD  the .p12's password.
-#   DEVELOPER_ID         its name: "Developer ID Application: Name (TEAMID)".
-#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
-#                        for notarization (an app-specific password).
-#   BUNDLE_ID            the bundle identifier, e.g. com.example.patina.
+#                        caffeines/homebrew-patina. Without it the homebrew
+#                        job fails.
 
 name: Release
 
@@ -49,15 +40,12 @@ env:
 
 jobs:
   build:
-    name: Test and build the DMG
+    name: Check the tag and test on macOS
     runs-on: macos-15
     outputs:
       version: ${{ steps.meta.outputs.version }}
       commit: ${{ steps.meta.outputs.commit }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
-    env:
-      SIGN: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' }}
-      NOTARIZE: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' && secrets.APPLE_ID != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,49 +72,6 @@ jobs:
 
       - name: Test
         run: cargo test --locked
-
-      - name: Import the signing certificate
-        if: env.SIGN == 'true'
-        env:
-          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-        run: |
-          keychain="$RUNNER_TEMP/release.keychain-db"
-          password=$(openssl rand -hex 24)
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          security default-keychain -s "$keychain"
-
-      - name: Store the notarization credentials
-        if: env.NOTARIZE == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: |
-          xcrun notarytool store-credentials patina-notary \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
-          echo "NOTARY_PROFILE=patina-notary" >> "$GITHUB_ENV"
-
-      - name: Build the DMG
-        env:
-          DEVELOPER_ID: ${{ env.SIGN == 'true' && secrets.DEVELOPER_ID || '' }}
-          BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
-        run: |
-          [ -n "$BUNDLE_ID" ] || unset BUNDLE_ID
-          ./scripts/release-macos.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dmg
-          path: target/dist/*.dmg
-          if-no-files-found: error
 
   linux:
     name: Test and build for Linux (${{ matrix.arch }})
@@ -188,7 +133,6 @@ jobs:
       - name: Write the release notes
         env:
           VERSION: ${{ needs.build.outputs.version }}
-          SIGNED: ${{ secrets.MACOS_CERT_P12 != '' && secrets.DEVELOPER_ID != '' }}
         run: |
           prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
           range="${prev:+$prev..}$TAG"
@@ -205,13 +149,6 @@ jobs:
             echo '```sh'
             echo "brew install caffeines/patina/patina    # builds $TAG from source"
             echo '```'
-            echo
-            if [ "$SIGNED" = "true" ]; then
-              echo "Or download the DMG below (Apple silicon, macOS 13 or later)."
-            else
-              echo "The DMG below is ad-hoc signed, so macOS blocks it on Macs other than the one that built it."
-              echo "Homebrew builds Patina on your Mac, which avoids that."
-            fi
             echo
             echo "### Linux"
             echo
@@ -249,7 +186,9 @@ jobs:
 
   homebrew:
     name: Update the Homebrew formula
-    needs: [build, release]
+    # The formula builds from the tag, so it doesn't wait for the Linux
+    # packages or the GitHub release.
+    needs: build
     if: needs.build.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     env:
@@ -257,20 +196,19 @@ jobs:
       COMMIT: ${{ needs.build.outputs.commit }}
       VERSION: ${{ needs.build.outputs.version }}
     steps:
-      - name: Without a token, say so
+      - name: Check for the tap token
         if: env.TAP_TOKEN == ''
         run: |
-          echo "::warning::HOMEBREW_TAP_TOKEN isn't set, so caffeines/homebrew-patina still points at the previous release. Set tag: \"$TAG\" and revision: \"$COMMIT\" in Formula/patina.rb by hand."
+          echo "::error::HOMEBREW_TAP_TOKEN isn't set, so caffeines/homebrew-patina still points at the previous release. Add the secret and re-run this job, or set tag: \"$TAG\" and revision: \"$COMMIT\" in Formula/patina.rb by hand."
+          exit 1
 
       - uses: actions/checkout@v4
-        if: env.TAP_TOKEN != ''
         with:
           repository: caffeines/homebrew-patina
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
       - name: Point the formula at the release
-        if: env.TAP_TOKEN != ''
         working-directory: tap
         run: |
           sed -i -E \

@@ -443,6 +443,35 @@ fn machine_cli(args: &[String]) -> i32 {
     }
 }
 
+/// Homebrew's install sandbox can't write outside its prefix, so a Homebrew
+/// install leaves Patina.app in the Cellar. The first time Patina opens from
+/// there, link it into /Applications through the opt path, which follows
+/// upgrades. Only once, so removing the link sticks.
+#[cfg(target_os = "macos")]
+fn link_into_applications() {
+    use std::path::{Path, PathBuf};
+    let Some(exe) = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()) else { return };
+    let exe = exe.to_string_lossy();
+    let Some(i) = exe.find("/Cellar/patina/") else { return };
+    let app = PathBuf::from(format!("{}/opt/patina/Patina.app", &exe[..i]));
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let marker = Path::new(&home).join("Library/Application Support/Patina/linked-into-applications");
+    if marker.exists() || !app.exists() {
+        return;
+    }
+    let link = Path::new("/Applications/Patina.app");
+    if link.symlink_metadata().is_err() {
+        match std::os::unix::fs::symlink(&app, link) {
+            Ok(()) => eprintln!("Added Patina to Applications."),
+            Err(e) => eprintln!("Couldn't add Patina to Applications ({e}). To add it: ln -sf {} {}", app.display(), link.display()),
+        }
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&marker, b"1\n");
+}
+
 fn main() -> eframe::Result {
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("engine") {
@@ -452,6 +481,8 @@ fn main() -> eframe::Result {
         std::process::exit(machine_cli(&argv[2..]));
     }
     let args = parse_args();
+    #[cfg(target_os = "macos")]
+    link_into_applications();
     // With this computer's own Docker Engine there's nothing to install, so
     // first run is until the first-run flow has been through once.
     let first_run = if args.demo || engine::NATIVE { !app::is_onboarded() } else { !engine::setup::installed() };

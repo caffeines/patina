@@ -45,8 +45,9 @@ brew install --HEAD caffeines/patina/patina    # the main branch
 
 Homebrew builds Patina from source on your Mac, so Gatekeeper has nothing to block. The first
 install takes a few minutes while Rust compiles, and needs current Command Line Tools (Homebrew
-says if they're out of date). It installs the `patina` command and `Patina.app`, and `brew info
-patina` shows how to add the app to Applications. To update: `brew update && brew upgrade patina`.
+says if they're out of date). It installs the `patina` command and `Patina.app`. Run `patina`
+once and it adds the app to Applications (Homebrew itself can't write there); upgrades keep the
+link working. To update: `brew update && brew upgrade patina`.
 
 **The first launch sets up the engine.** It downloads Debian's arm64 cloud image, checks it
 against Debian's SHA-512, and installs Docker Engine in the VM. That takes about 2–3 minutes,

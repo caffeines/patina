@@ -79,13 +79,15 @@ download against the release's `SHA256SUMS`:
 
 - **Debian and Ubuntu:** it installs the .deb with apt, which asks for your password through
   sudo and adds the libraries the window needs. If there's no Docker yet, apt also installs
-  Docker Engine (`docker.io`).
+  Docker Engine (`docker.io`). It adds you to the `docker` group, which applies once you sign
+  out and back in.
 - **Other distributions, or no sudo:** it installs the AppImage for you alone, as
   `~/.local/bin/patina`, with a menu entry and an icon. The AppImage needs FUSE (the `fuse3`
   package).
 
-At the end, it checks that Patina can reach Docker, and says what to do if not: usually
-`sudo usermod -aG docker $USER`, then sign out and back in. Run it again to update. To choose
+At the end, it checks that Patina can reach Docker, and says what to do if not. With the
+AppImage, that's usually `sudo usermod -aG docker $USER`, then sign out and back in. Run it
+again to update. To choose
 the release or the format, set `PATINA_VERSION=1.1.0` or `PATINA_INSTALL=appimage` on `sh`:
 `curl … | PATINA_INSTALL=appimage sh`. To remove Patina, run `sudo apt remove patina`, or delete
 the three files the script lists.

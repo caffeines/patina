@@ -4,10 +4,10 @@
 #   curl -fsSL https://raw.githubusercontent.com/caffeines/patina/main/install.sh | sh
 #
 # On Debian and Ubuntu it installs the .deb with apt, which also installs the
-# libraries the window needs (it asks for your password through sudo).
-# Elsewhere, or without sudo, it installs the AppImage for you alone: the
-# command at ~/.local/bin/patina, with a menu entry and an icon. Downloads are
-# checked against the release's SHA256SUMS.
+# libraries the window needs (it asks for your password through sudo), and
+# adds you to the docker group. Elsewhere, or without sudo, it installs the
+# AppImage for you alone: the command at ~/.local/bin/patina, with a menu entry
+# and an icon. Downloads are checked against the release's SHA256SUMS.
 #
 #   PATINA_VERSION  a release to install, such as 1.1.0 (default: the latest)
 #   PATINA_INSTALL  deb or appimage (default: deb where apt is)
@@ -78,6 +78,7 @@ fi
 
 TMP=$(mktemp -d)
 NEW=""
+JOINED=""
 trap 'rm -rf "$TMP" ${NEW:+"$NEW"}' EXIT
 # apt reads the .deb as its own _apt user, so let it in.
 chmod 755 "$TMP"
@@ -104,6 +105,12 @@ if [ "$METHOD" = deb ]; then
   say "Installing it with apt"
   $SUDO apt-get update -qq < /dev/null || fail "apt couldn't update its package lists."
   $SUDO apt-get install -y $REC "$TMP/$FILE" < /dev/null || fail "apt couldn't install $FILE."
+  # Patina uses Docker as you, which takes the docker group. That's as much
+  # as sudo, which you have here, so add yourself.
+  ME=$(id -un)
+  if [ "$ME" != root ] && getent group docker > /dev/null && ! id -nG "$ME" | tr ' ' '\n' | grep -qx docker; then
+    $SUDO usermod -aG docker "$ME" < /dev/null && JOINED=1 || say "Couldn't add you to the docker group."
+  fi
   WHERE=/usr/bin/patina
   REMOVE="sudo apt remove patina"
 else
@@ -152,4 +159,10 @@ esac
 say "To remove it: $REMOVE"
 # Patina's own check: whether it can reach Docker, and what to do if not.
 say ""
-"$WHERE" engine start < /dev/null || true
+if [ -n "$JOINED" ]; then
+  say "Added you to the docker group. It applies once you sign out and back in (or, in this terminal, after: newgrp docker)."
+  # This shell started before that, so run the check with the group.
+  if command -v sg > /dev/null; then sg docker -c "'$WHERE' engine start" < /dev/null || true; fi
+else
+  "$WHERE" engine start < /dev/null || true
+fi

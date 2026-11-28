@@ -481,6 +481,16 @@ fn main() -> eframe::Result {
         std::process::exit(machine_cli(&argv[2..]));
     }
     let args = parse_args();
+    // Without a desktop session winit can't open the window; say so plainly.
+    let unset = |v| std::env::var_os(v).is_none_or(|s| s.is_empty());
+    if cfg!(target_os = "linux") && ["WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY"].into_iter().all(unset) {
+        eprintln!(
+            "Patina's window needs a desktop session (Wayland or X11), and this terminal has none: \
+             WAYLAND_DISPLAY and DISPLAY aren't set. Open Patina from your desktop's app menu.\n\
+             Here, `patina engine status` and `patina machine list` still work."
+        );
+        std::process::exit(1);
+    }
     #[cfg(target_os = "macos")]
     link_into_applications();
     // With this computer's own Docker Engine there's nothing to install, so

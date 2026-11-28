@@ -453,9 +453,9 @@ fn mark_onboarded() {
     }
 }
 
-/// The app icon, drawn in code: the Patina mark on a white rounded square,
-/// shaded faintly toward the bottom, with a hairline edge so it holds its
-/// shape on white.
+/// The app icon, drawn in code: the Patina mark on a warm charcoal rounded
+/// square, darkening toward the bottom, with a lighter hairline edge so it
+/// holds its shape on a dark Dock or menu.
 pub fn app_icon(n: usize) -> egui::IconData {
     let mut rgba = vec![0u8; n * n * 4];
     let c = n as f32 / 2.0;
@@ -463,8 +463,8 @@ pub fn app_icon(n: usize) -> egui::IconData {
     let half = n as f32 * 0.41;
     let rad = n as f32 * 0.09;
     let edge = (n as f32 * 0.006).max(1.0);
-    let (top, bottom) = ([255.0, 255.0, 255.0], [243.0, 240.0, 235.0]);
-    let rim = [222u8, 216, 207, 255];
+    let (top, bottom) = ([54.0, 49.0, 44.0], [36.0, 33.0, 30.0]);
+    let rim = [78u8, 72, 65, 255];
     let cu = theme::COPPER.to_array();
     let vg = theme::VERDIGRIS.to_array();
     for y in 0..n {

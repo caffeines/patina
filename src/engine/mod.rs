@@ -31,6 +31,8 @@ pub mod paths;
 pub mod setup;
 
 #[cfg(target_os = "macos")]
+mod balloon;
+#[cfg(target_os = "macos")]
 pub mod daemon;
 #[cfg(target_os = "macos")]
 mod mdns;
@@ -46,3 +48,5 @@ pub const NATIVE: bool = cfg!(not(target_os = "macos"));
 pub const PORT_DOCKER: u32 = 2375;
 /// vsock port where the guest forwards a TCP port named in the first line.
 pub const PORT_FORWARD: u32 = 2376;
+/// vsock port where the guest reports its memory use, for the balloon.
+pub const PORT_MEMORY: u32 = 2377;

@@ -109,6 +109,19 @@ that need Patina's VM say so instead.
   the current docker context. It also adds one marked line to `~/.zprofile` (and
   `~/.bash_profile`, if you have one) that puts `~/.patina/bin` first on PATH in new terminals.
   Both are switches in Settings › General; turning them off undoes them.
+- **Memory.** macOS gives the VM memory as the guest first touches it, and the Virtualization
+  framework never takes it back, even from the memory balloon. Linux fills all its free memory
+  with file cache, so on its own the VM grows to its full size after a few builds or pulls. To
+  stop that, every 2 seconds the helper reads the guest's memory use over vsock port 2377
+  (`patina-memory` in the guest) and sizes the balloon so the guest may use what it uses plus at
+  least 1 GB. The guest gets more at once when it needs it, and the balloon takes the extra back
+  after 30 seconds of needing less. A guest that runs out between readings takes memory back
+  from the balloon itself, so a spike doesn't get a container killed. So the VM grows to the
+  most it has really used, plus room, until the engine restarts. `engine.log` notes each change.
+  The balloon needs the guest kernel booted with `init_on_alloc=0`, so Linux doesn't zero the
+  pages the balloon takes. Zeroing them would touch them and grow the VM by the balloon's size.
+  VMs set up before this get `patina-memory` and the boot option when the engine starts. The
+  balloon starts working the time after that.
 - **The helper** (`patina engine run`) owns the VM. It keeps running after the app quits, like a
   system service. To get the virtualization entitlement, the app keeps an ad-hoc-signed copy of
   itself in `~/.patina/bin/patina-engine`.

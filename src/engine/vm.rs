@@ -77,13 +77,18 @@ pub fn on_main<R: Send + 'static>(f: impl FnOnce() -> R + Send) -> R {
     slot.into_inner().unwrap().expect("main queue result")
 }
 
+/// The memory the VM is built with, in bytes.
+pub fn memory_size(spec: &Spec) -> u64 {
+    let min = unsafe { VZVirtualMachineConfiguration::minimumAllowedMemorySize() };
+    ((spec.memory_gb as u64) << 30).max(min)
+}
+
 fn build(spec: &Spec) -> Result<Retained<VZVirtualMachineConfiguration>, String> {
     unsafe {
         let cfg = VZVirtualMachineConfiguration::new();
         let max_cpu = VZVirtualMachineConfiguration::maximumAllowedCPUCount() as u32;
         cfg.setCPUCount(spec.cpus.clamp(1, max_cpu.max(1)) as usize);
-        let min_mem = VZVirtualMachineConfiguration::minimumAllowedMemorySize();
-        cfg.setMemorySize(((spec.memory_gb as u64) << 30).max(min_mem));
+        cfg.setMemorySize(memory_size(spec));
         cfg.setPlatform(&VZGenericPlatformConfiguration::new());
 
         // UEFI boot, with a persistent variable store.
@@ -226,6 +231,18 @@ pub fn force_stop() {
         if vm.canStop() {
             let block = RcBlock::new(|_err: *mut NSError| {});
             vm.stopWithCompletionHandler(&block);
+        }
+    }
+}
+
+/// Set the memory balloon so the guest may use `bytes` of memory
+/// ([`super::balloon`]). Main thread.
+pub fn set_memory_target(bytes: u64) {
+    let Some(vm) = the_vm() else { return };
+    unsafe {
+        let Some(device) = vm.memoryBalloonDevices().firstObject() else { return };
+        if let Ok(balloon) = device.downcast::<VZVirtioTraditionalMemoryBalloonDevice>() {
+            balloon.setTargetVirtualMachineMemorySize(bytes);
         }
     }
 }

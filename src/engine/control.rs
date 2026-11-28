@@ -33,7 +33,8 @@ pub struct Status {
 /// 1: forwards the Kubernetes API, reports its revision.
 /// 2: upgrades the guest so `docker run` and `docker exec` output isn't cut off.
 /// 3: names running machines `<name>.patina.local` on this Mac.
-pub const ENGINE_REV: u32 = 3;
+/// 4: keeps the guest's file cache from growing the VM to its full memory (the balloon).
+pub const ENGINE_REV: u32 = 4;
 
 /// The running engine is older than this app and lacks what changed since.
 pub fn stale(s: &Status) -> bool {

@@ -36,6 +36,7 @@ pub fn docker_sock() -> PathBuf {
 pub fn control_sock() -> PathBuf {
     run().join("engine.sock")
 }
+#[cfg(target_os = "macos")]
 pub fn pid_file() -> PathBuf {
     run().join("engine.pid")
 }
@@ -55,6 +56,7 @@ pub fn mac_file() -> PathBuf {
 pub fn provisioned() -> PathBuf {
     vm().join("provisioned")
 }
+#[cfg(target_os = "macos")]
 pub fn console_log() -> PathBuf {
     logs().join("console.log")
 }

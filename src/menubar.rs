@@ -10,8 +10,10 @@
 
 use std::sync::{Mutex, OnceLock};
 
-/// What the status item asked for.
+/// What the status item asked for. The app handles these everywhere, but
+/// only the macOS status item sends them.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Event {
     /// Left click: open or close the popover.
     Toggle(Anchor),
@@ -37,6 +39,7 @@ pub const POPOVER_SIZE: [f32; 2] = [380.0, 540.0];
 /// The popover window's title (it has no title bar; this finds it).
 pub const POPOVER_TITLE: &str = "Patina menu";
 /// Space between the menu bar and the popover.
+#[cfg(target_os = "macos")]
 const GAP: f64 = 6.0;
 
 static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
@@ -49,6 +52,7 @@ pub fn trace(what: &str) {
 }
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
 fn push(ev: Event) {
     EVENTS.lock().unwrap_or_else(|e| e.into_inner()).push(ev);
     if let Some(ctx) = CTX.get() {
@@ -63,6 +67,7 @@ pub fn take_events() -> Vec<Event> {
 
 /// The menu bar glyph: the Patina mark as a template image (alpha only), a
 /// ring with its lower-right half filled. `n` is the size in pixels.
+#[cfg(any(target_os = "macos", test))]
 pub fn glyph_rgba(n: usize) -> Vec<u8> {
     let mut rgba = vec![0u8; n * n * 4];
     let c = n as f32 / 2.0;

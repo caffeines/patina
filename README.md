@@ -30,7 +30,8 @@ computer.
   window keeps Patina running there.
 - **Settings:** open at login, the terminal app to use (Terminal, Warp, iTerm, Ghostty, or on
   Linux, the desktop's), and on macOS, the VM's CPUs and memory and Rosetta for `linux/amd64`
-  images. The command palette is `⌘K` (Ctrl+K on Linux).
+  images. The memory setting is a ceiling: the VM takes the most its containers have used
+  plus about 1 GB, not the whole setting for file cache. The command palette is `⌘K` (Ctrl+K on Linux).
 
 ## Install
 

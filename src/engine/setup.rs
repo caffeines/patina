@@ -398,8 +398,9 @@ fn patch_boot(raw: &Path, kernel: Option<&str>) -> Result<(), String> {
                 Some(k) => (format!("/boot/vmlinuz-{k}"), format!("/boot/initrd.img-{k}")),
                 None => ("/vmlinuz".to_string(), "/initrd.img".to_string()),
             };
+            let args = super::guest::KERNEL_ARGS;
             let new = format!(
-                "search.fs_uuid {uuid} root\nset prefix=($root)'/boot/grub'\nif [ -e ($root){vmlinuz} ]; then\n  linux ($root){vmlinuz} root=UUID={uuid} ro console=hvc0\n  initrd ($root){initrd}\n  boot\nfi\nconfigfile $prefix/grub.cfg\n"
+                "search.fs_uuid {uuid} root\nset prefix=($root)'/boot/grub'\nif [ -e ($root){vmlinuz} ]; then\n  linux ($root){vmlinuz} root=UUID={uuid} ro {args}\n  initrd ($root){initrd}\n  boot\nfi\nconfigfile $prefix/grub.cfg\n"
             );
             fs::write(&cfg, new).map_err(|e| e.to_string())
         })();

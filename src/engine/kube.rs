@@ -28,6 +28,7 @@ const HELPER: &str = "alpine:3.20";
 /// Label on Patina's own short-lived containers, which the UI hides.
 pub const HELPER_LABEL: &str = "dev.patina.helper";
 /// Where Patina forwards the API server on the Mac.
+#[cfg(target_os = "macos")]
 pub const API_PORT: u16 = 6443;
 
 /// Run `script` with `sh` as root inside the VM. Returns its output, or

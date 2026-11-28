@@ -6,7 +6,9 @@
 //! - `~/.patina/run/engine.sock`, a one-line protocol (`status`, `stop`),
 //! - localhost listeners for every published container port,
 //! - `<machine>.patina.local` names for running machines, on this Mac,
-//! - a monitor that notices when Docker is ready and when the VM stops.
+//! - a monitor that notices when Docker is ready and when the VM stops,
+//! - the memory balloon, which keeps the guest's file cache from growing the
+//!   VM to its full memory ([`super::balloon`]).
 
 use std::collections::{HashMap, HashSet};
 use std::os::fd::{FromRawFd, RawFd};
@@ -16,12 +18,13 @@ use std::time::{Duration, Instant};
 
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use bollard::{Docker, API_DEFAULT_VERSION};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
+use super::balloon::{self, Balloon};
 use super::control::Status;
-use super::{config, paths, setup, vm, PORT_DOCKER, PORT_FORWARD};
+use super::{config, paths, setup, vm, PORT_DOCKER, PORT_FORWARD, PORT_MEMORY};
 
 struct Shared {
     status: Mutex<Status>,
@@ -84,6 +87,7 @@ pub fn run() -> i32 {
         mac,
         rosetta: cfg.rosetta,
     };
+    let memory = vm::memory_size(&spec);
     cleanup();
     let _ = std::fs::write(paths::pid_file(), std::process::id().to_string());
     log(&format!("starting Patina engine: {} CPUs, {} GB memory, first boot: {first_boot}", cfg.cpus, cfg.memory_gb));
@@ -100,7 +104,7 @@ pub fn run() -> i32 {
         .name("patina-engine".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
-            rt.block_on(serve(sh));
+            rt.block_on(serve(sh, memory));
         })
         .expect("engine thread");
 
@@ -128,11 +132,12 @@ pub fn run() -> i32 {
     dispatch2::dispatch_main();
 }
 
-async fn serve(sh: Arc<Shared>) {
+async fn serve(sh: Arc<Shared>, memory: u64) {
     tokio::spawn(control_server(sh.clone()));
     tokio::spawn(docker_proxy());
     tokio::spawn(monitor(sh.clone()));
     tokio::spawn(forwarder(sh.clone()));
+    tokio::spawn(reclaim(sh.clone(), memory));
     let sig = sh.clone();
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
@@ -280,6 +285,55 @@ async fn shutdown(sh: Arc<Shared>) {
     log("stopped");
     cleanup();
     std::process::exit(0);
+}
+
+/// Size the memory balloon from the guest's memory use, so the guest's file
+/// cache doesn't grow the VM to its full memory. `size` is the VM's memory.
+async fn reclaim(sh: Arc<Shared>, size: u64) {
+    let mut balloon: Option<Balloon> = None;
+    let mut failing = false;
+    loop {
+        tokio::time::sleep(balloon::INTERVAL).await;
+        if sh.state() != "running" || sh.stopping.load(Ordering::SeqCst) {
+            continue;
+        }
+        let stats = match guest_memory().await {
+            Ok(s) => s,
+            Err(e) => {
+                // A VM set up by an older Patina gets the channel from
+                // guest::upgrade, just after the engine starts.
+                if !failing {
+                    log(&format!("couldn't read the guest's memory use: {e}"));
+                }
+                failing = true;
+                continue;
+            }
+        };
+        failing = false;
+        // Settling starts with the first reading, once Docker is up.
+        let b = balloon.get_or_insert_with(|| Balloon::new(size, Instant::now()));
+        let Some(target) = b.next(&stats, Instant::now()) else { continue };
+        let _ = tokio::task::spawn_blocking(move || vm::on_main(move || vm::set_memory_target(target))).await;
+        log(&format!("memory: the guest may use {} (it uses {})", gb(target), gb(stats.used())));
+    }
+}
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+}
+
+/// Ask the guest's `patina-memory` for its memory use.
+async fn guest_memory() -> Result<balloon::Stats, String> {
+    let (fd, id) = vm::connect(PORT_MEMORY).await?;
+    let read = async {
+        let mut s = stream(fd).map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        s.read_to_string(&mut text).await.map_err(|e| e.to_string())?;
+        balloon::Stats::parse(&text).ok_or_else(|| format!("unexpected reply: {:?}", text.trim()))
+    };
+    let r = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap_or_else(|_| Err("no reply".into()));
+    vm::release(id);
+    r
 }
 
 /// Mirror published container ports onto localhost, and name running

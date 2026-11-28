@@ -106,3 +106,8 @@ macOS-only for now.
 
 To run Patina from source, find your way around the code, or make a release, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Patina is licensed under the [Apache License 2.0](LICENSE). The fonts it bundles, Instrument
+Sans and DM Mono, are under the SIL Open Font License 1.1.
